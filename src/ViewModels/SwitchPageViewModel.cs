@@ -2,36 +2,29 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ExHyperV.Models;
-using ExHyperV.Properties;
 using ExHyperV.Services;
-using ExHyperV.Tools;
 using ExHyperV.Interaction;
 using ExHyperV.Views;
 
 namespace ExHyperV.ViewModels
 {
-    public partial class VMNetViewModel : ObservableObject
+    public partial class SwitchPageViewModel : PageViewModelBase
     {
-        // ===== 字段 =====
-
-        private readonly HyperVSwitchService _networkService;
-
         // ===== 属性 =====
 
         [ObservableProperty] private bool _isBusy = false;
-        [ObservableProperty] private bool _isContentVisible = true;
         [ObservableProperty] private string? _errorMessage;
 
         public ObservableCollection<SwitchViewModel> Switches { get; } = new();
 
-        private List<PhysicalAdapterInfo> _physicalAdapters = new();
+        private List<string> _physicalAdapters = new();
+        private List<string> _bridgeableAdapters = new();
         private List<SwitchInfo> _rawSwitchInfos = new();
 
         // ===== 构造 =====
 
-        public VMNetViewModel()
+        public SwitchPageViewModel()
         {
-            _networkService = new HyperVSwitchService();
             LoadNetworkInfoCommand.Execute(null);
         }
 
@@ -40,13 +33,14 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task AddNewSwitchAsync()
         {
-            var addSwitchVm = new AddSwitchViewModel(Switches, _physicalAdapters);
+            _bridgeableAdapters = await HyperVSwitchService.GetBridgeableAdaptersAsync();
+            var addSwitchVm = new AddSwitchViewModel(Switches, _physicalAdapters, _bridgeableAdapters);
             var addSwitchView = new AddSwitchView
             {
                 DataContext = addSwitchVm
             };
 
-            var createConfirmed = await Dialogs.ShowContentDialogAsync(ExHyperV.Properties.Resources.Title_AddVirtualSwitch, addSwitchView);
+            var createConfirmed = await Dialogs.ShowContentDialogAsync(Properties.Resources.Title_AddVirtualSwitch, addSwitchView);
 
             if (!createConfirmed)
             {
@@ -58,9 +52,9 @@ namespace ExHyperV.ViewModels
                 IsBusy = true;
                 try
                 {
-                    string typeForService = addSwitchVm.SelectedSwitchType;
+                    var typeForService = addSwitchVm.SelectedSwitchType;
 
-                    await _networkService.CreateSwitchAsync(
+                    await HyperVSwitchService.CreateSwitchAsync(
                         addSwitchVm.SwitchName,
                         typeForService,
                         addSwitchVm.SelectedNetworkAdapter
@@ -70,7 +64,7 @@ namespace ExHyperV.ViewModels
                 }
                 catch (System.Exception ex)
                 {
-                    await Dialogs.ShowAlertAsync(ExHyperV.Properties.Resources.Error_CreationFailed, ex.Message);
+                    await Dialogs.ShowAlertAsync(Properties.Resources.Error_CreationFailed, ex.Message);
                 }
                 finally
                 {
@@ -79,7 +73,7 @@ namespace ExHyperV.ViewModels
             }
             else
             {
-                await Dialogs.ShowAlertAsync(ExHyperV.Properties.Resources.Validation_InputInvalid, addSwitchVm.ErrorMessage ?? Resources.Error_Unknown);
+                await Dialogs.ShowAlertAsync(Properties.Resources.Validation_InputInvalid, addSwitchVm.ErrorMessage ?? Properties.Resources.Error_Unknown);
             }
         }
         [RelayCommand]
@@ -93,12 +87,12 @@ namespace ExHyperV.ViewModels
             IsBusy = true;
             try
             {
-                await _networkService.DeleteSwitchAsync(switchToDelete.SwitchName);
+                await HyperVSwitchService.DeleteSwitchAsync(switchToDelete.SwitchName);
                 await CoreRefreshLogicAsync();
             }
             catch (System.Exception ex)
             {
-                await Dialogs.ShowAlertAsync(ExHyperV.Properties.Resources.Error_DeletionFailed, ex.Message);
+                await Dialogs.ShowAlertAsync(Properties.Resources.Error_DeletionFailed, ex.Message);
             }
             finally
             {
@@ -128,35 +122,37 @@ namespace ExHyperV.ViewModels
         private async Task CoreRefreshLogicAsync()
         {
             ErrorMessage = null;
-            IsContentVisible = false;
+            // 退订旧 SwitchViewModel 的事件再清空，避免被丢弃的实例仍响应 PropertyChanged 触发误配置
+            foreach (var oldVm in Switches)
+                oldVm.PropertyChanged -= OnSwitchViewModelPropertyChanged;
             Switches.Clear();
 
             try
             {
-                var (switches, adapters) = await _networkService.GetNetworkInfoAsync();
+                var (switches, adapters) = await HyperVSwitchService.GetNetworkInfoAsync();
                 _rawSwitchInfos = switches;
                 _physicalAdapters = adapters;
+                _bridgeableAdapters = await HyperVSwitchService.GetBridgeableAdaptersAsync();
 
                 if (!_rawSwitchInfos.Any())
                 {
-                    ErrorMessage = ExHyperV.Properties.Resources.Info_NoSwitchesFound;
+                    ErrorMessage = Properties.Resources.Info_NoSwitchesFound;
                 }
                 else
                 {
                     foreach (var switchInfo in _rawSwitchInfos)
                     {
-                        var switchVm = new SwitchViewModel(switchInfo, _networkService, _physicalAdapters, Switches);
+                        var switchVm = new SwitchViewModel(switchInfo, _physicalAdapters, _bridgeableAdapters);
                         switchVm.PropertyChanged += OnSwitchViewModelPropertyChanged;
                         Switches.Add(switchVm);
                     }
                     UpdateAllSwitchMenus();
-                    IsContentVisible = true;
                 }
             }
             catch (Exception ex)
             {
                 ErrorMessage = string.Format(Properties.Resources.Error_LoadNetworkInfoFailed, ex.Message);
-                await Dialogs.ShowAlertAsync(Resources.Error_Title, ErrorMessage);
+                await Dialogs.ShowAlertAsync(Properties.Resources.Error_Title, ErrorMessage);
             }
         }
 
@@ -187,29 +183,29 @@ namespace ExHyperV.ViewModels
             var originalSwitchInfo = _rawSwitchInfos.FirstOrDefault(s => s.Id == changedSwitch.SwitchId);
             if (originalSwitchInfo == null) return;
 
-            if (changedSwitch.SelectedNetworkMode == "NAT")
+            if (changedSwitch.SelectedNetworkMode == SwitchMode.NAT)
             {
-                var otherNatSwitch = Switches.FirstOrDefault(s => s.SwitchId != changedSwitch.SwitchId && !s.IsDefaultSwitch && s.SelectedNetworkMode == "NAT");
+                var otherNatSwitch = Switches.FirstOrDefault(s => s.SwitchId != changedSwitch.SwitchId && !s.IsDefaultSwitch && s.SelectedNetworkMode == SwitchMode.NAT);
                 if (otherNatSwitch != null)
                 {
-                    await Dialogs.ShowAlertAsync(ExHyperV.Properties.Resources.Error_ConfigurationConflict, string.Format(Properties.Resources.Error_OnlyOneNatNetworkAllowed, otherNatSwitch.SwitchName));
+                    await Dialogs.ShowAlertAsync(Properties.Resources.Error_ConfigurationConflict, string.Format(Properties.Resources.Error_OnlyOneNatNetworkAllowed, otherNatSwitch.SwitchName));
                     await changedSwitch.RevertTo(originalSwitchInfo);
                     return;
                 }
             }
 
-            if ((changedSwitch.SelectedNetworkMode == "Bridge" || changedSwitch.SelectedNetworkMode == "NAT") && !string.IsNullOrEmpty(changedSwitch.SelectedUpstreamAdapter))
+            if ((changedSwitch.SelectedNetworkMode == SwitchMode.Bridge || changedSwitch.SelectedNetworkMode == SwitchMode.NAT) && !string.IsNullOrEmpty(changedSwitch.SelectedUpstreamAdapter))
             {
                 var conflictingSwitch = Switches.FirstOrDefault(s => s.SwitchId != changedSwitch.SwitchId && !string.IsNullOrEmpty(s.SelectedUpstreamAdapter) && s.SelectedUpstreamAdapter == changedSwitch.SelectedUpstreamAdapter);
                 if (conflictingSwitch != null)
                 {
-                    await Dialogs.ShowAlertAsync(ExHyperV.Properties.Resources.Error_ConfigurationConflict, string.Format(Properties.Resources.Error_PhysicalAdapterInUse, changedSwitch.SelectedUpstreamAdapter, conflictingSwitch.SwitchName));
+                    await Dialogs.ShowAlertAsync(Properties.Resources.Error_ConfigurationConflict, string.Format(Properties.Resources.Error_PhysicalAdapterInUse, changedSwitch.SelectedUpstreamAdapter, conflictingSwitch.SwitchName));
                     await changedSwitch.RevertTo(originalSwitchInfo);
                     return;
                 }
             }
 
-            if ((changedSwitch.SelectedNetworkMode == "Bridge" || changedSwitch.SelectedNetworkMode == "NAT") && string.IsNullOrEmpty(changedSwitch.SelectedUpstreamAdapter))
+            if ((changedSwitch.SelectedNetworkMode == SwitchMode.Bridge || changedSwitch.SelectedNetworkMode == SwitchMode.NAT) && string.IsNullOrEmpty(changedSwitch.SelectedUpstreamAdapter))
             {
                 return;
             }
@@ -217,12 +213,11 @@ namespace ExHyperV.ViewModels
             IsBusy = true;
             try
             {
-                await _networkService.UpdateSwitchConfigurationAsync(
+                await HyperVSwitchService.UpdateSwitchConfigurationAsync(
                     changedSwitch.SwitchName,
                     changedSwitch.SelectedNetworkMode,
                     changedSwitch.SelectedUpstreamAdapter,
-                    changedSwitch.IsHostConnectionAllowed,
-                    false
+                    changedSwitch.IsHostConnectionAllowed
                 );
 
                 await RefreshDataModels();
@@ -230,7 +225,7 @@ namespace ExHyperV.ViewModels
             }
             catch (Exception ex)
             {
-                await Dialogs.ShowAlertAsync(ExHyperV.Properties.Resources.UpdateFailed, string.Format(Properties.Resources.Error_UpdateSwitchConfigFailed, changedSwitch.SwitchName, ex.InnerException?.Message ?? ex.Message));
+                await Dialogs.ShowAlertAsync(Properties.Resources.UpdateFailed, string.Format(Properties.Resources.Error_UpdateSwitchConfigFailed, changedSwitch.SwitchName, ex.InnerException?.Message ?? ex.Message));
                 await RefreshDataModels();
                 UpdateAllSwitchMenus();
             }
@@ -242,9 +237,10 @@ namespace ExHyperV.ViewModels
 
         private async Task RefreshDataModels()
         {
-            var (switches, adapters) = await _networkService.GetNetworkInfoAsync();
+            var (switches, adapters) = await HyperVSwitchService.GetNetworkInfoAsync();
             _rawSwitchInfos = switches;
             _physicalAdapters = adapters;
+            _bridgeableAdapters = await HyperVSwitchService.GetBridgeableAdaptersAsync();
 
             var updateTasks = new List<Task>();
             foreach (var vm in Switches)

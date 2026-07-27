@@ -15,6 +15,7 @@ namespace ExHyperV.Tools
     {
         private const string MsRdpClient9Clsid = "8b918b82-7985-4c24-89df-c33ad2bbfbcd";
         private bool _smartSizing;   // 当前 SmartSizing 状态缓存（SetSmartSizing 用，避免重复设值闪烁）
+        private uint _zoomLevel;     // 当前 ZoomLevel% 缓存（SetZoomLevel 用，基本会话每次布局都会调，仅比例真变时才穿透 OCX）
 
         public event Action? Connected;
         public event Action<int>? Disconnected;
@@ -58,7 +59,7 @@ namespace ExHyperV.Tools
                 dynamic rdp = GetOcx();
                 rdp.Server = s.Server;
 
-                // ★ UI 父窗口句柄：控件弹出的子窗口需要有效父窗口，否则在框架回调里抛异常逃回 native → 0xC000041D。
+                // UI 父窗口句柄：控件弹出的子窗口需要有效父窗口，否则在框架回调里抛异常逃回 native → 0xC000041D。
                 // COMReference(tlbimp) 把它生成成 set_UIParentWindowHandle(ref _RemotableHandle/wireHWND)，需手填：
                 //   fContext = WDT_INPROC_CALL(0x48746457)，hInproc = HWND 低 32 位（USER 句柄恒在 32 位内）。
                 TrySet("UIParentWindowHandle", () =>
@@ -81,13 +82,29 @@ namespace ExHyperV.Tools
                 TrySet("NegotiateSecurityLayer", () => ocx.NegotiateSecurityLayer = s.NegotiateSecurityLayer);
 
                 // DisableCredentialsDelegation 非强类型属性，经 IMsRdpExtendedSettings 字符串属性包设置——
-                // 避免 reason=3848（凭据委派被拒）的关键，也是 stock typelib 查不到同名属性的原因。
+                // 避免 reason=3848（凭据委派被拒），也是 stock typelib 查不到同名属性的原因。
                 if (s.DisableCredentialsDelegation)
                     TrySet("DisableCredentialsDelegation", () =>
                     {
                         var ext = (IMsRdpExtendedSettings)GetOcx();
                         object on = true;
                         ext.set_Property("DisableCredentialsDelegation", ref on);
+                    });
+
+                // 初始缩放必须在连接前设置，动态显示接口无法影响首次显示的登录界面。
+                if (s.DesktopScaleFactor is >= 100 and <= 500)
+                    TrySet("DesktopScaleFactor", () =>
+                    {
+                        var ext = (IMsRdpExtendedSettings)GetOcx();
+                        object value = s.DesktopScaleFactor;
+                        ext.set_Property("DesktopScaleFactor", ref value);
+                    });
+                if (s.DeviceScaleFactor is 100 or 140 or 180)
+                    TrySet("DeviceScaleFactor", () =>
+                    {
+                        var ext = (IMsRdpExtendedSettings)GetOcx();
+                        object value = s.DeviceScaleFactor;
+                        ext.set_Property("DeviceScaleFactor", ref value);
                     });
 
                 // 初值原生不缩放：连上即清晰；之后由 SetSmartSizing 按"画面是否超出画面区"动态开关
@@ -155,15 +172,40 @@ namespace ExHyperV.Tools
         }
 
         /// <summary>增强会话改分辨率（不重连）。命名避开 Control.Resize 事件（否则 CS0108 隐藏告警）。</summary>
-        public void SetResolution(int width, int height)
+        public void SetResolution(int width, int height, double dpiScale)
         {
             if (width <= 0 || height <= 0) return;
             try
             {
                 dynamic rdp = GetOcx();
-                rdp.UpdateSessionDisplaySettings((uint)width, (uint)height, (uint)width, (uint)height, 0u, 100u, 1u);
+                // 参数复刻 VMConnect 的 RdpViewerControl：物理尺寸用毫米(非像素)、desktopScaleFactor=显示器 DPI%、
+                // deviceScaleFactor=100。末位传 1 是非法值(合法仅 100/140/180)，会让分辨率协商被拒 → 画面不随分辨率刷新+灰信箱。
+                // 使用宿主窗口提供的 DPI，避免 AxHost.DeviceDpi 在首次连接时仍为旧值。
+                uint dpi = (uint)Math.Max(96, Math.Round(96.0 * dpiScale));
+                uint desktopScaleFactor = (uint)Math.Round(dpi / 96.0 * 100.0);
+                uint physW = (uint)Math.Round(width * 25.4 / dpi);
+                uint physH = (uint)Math.Round(height * 25.4 / dpi);
+                rdp.UpdateSessionDisplaySettings((uint)width, (uint)height, physW, physH, 0u, desktopScaleFactor, 100u);
             }
             catch (Exception ex) { Debug.WriteLine("[Rdp] SetResolution 失败: " + ex.Message); }
+        }
+
+        /// <summary>基本会话缩放：设 mstscax 原生 ZoomLevel(百分比，如 100/150/200)。经 IMsRdpExtendedSettings 字符串属性包热设，
+        /// 由控件内部缩放——这正是微软 VMConnect "查看→缩放" 的真正机制（SmartSizing 只能缩不能放，放大必须走这里）。
+        /// 仅基本会话生效、全屏无效（调用方在全屏时传 100）。</summary>
+        public void SetZoomLevel(uint percent)
+        {
+            if (_zoomLevel == percent) return;   // 去重：LayoutRdpHost 每次布局都调，仅比例真变时穿透 OCX，避免拖动时每帧热设卡顿
+            // 未连接时设置 ZoomLevel 可能触发不可恢复的 COM 异常。
+            if (ConnectionState != 1) return;
+            _zoomLevel = percent;
+            try
+            {
+                var ext = (IMsRdpExtendedSettings)GetOcx();
+                object v = percent;
+                ext.set_Property("ZoomLevel", ref v);
+            }
+            catch (Exception ex) { Debug.WriteLine("[Rdp] SetZoomLevel 失败: " + ex.Message); }
         }
 
         private void TrySet(string what, Action set)

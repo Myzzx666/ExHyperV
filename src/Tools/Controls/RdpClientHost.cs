@@ -8,13 +8,12 @@ namespace ExHyperV.Tools
     /// 通用 RDP 宿主控件：在 WPF 里直接托管系统 mstscax ActiveX，依赖原生事件而非轮询。
     /// 不含 Hyper-V 专有逻辑——连接配方由调用方通过 <see cref="RdpConnectionSettings"/> 注入；
     /// 不反向依赖 ViewModel（全屏等状态以事件/方法暴露，由消费方桥接）。
-    /// 取代旧的 MsRdpExHost（491 行 + 20ms 轮询 + FindWindowEx + 键盘钩子轮询 + 手搓重连 + DataContext 倒置）。
     /// </summary>
     public class RdpClientHost : WindowsFormsHost
     {
         private readonly MsRdpAxHost _ax = new();
         // 黑布：WinForms 层(HWND)，连接期间盖住 mstscax + 窗口刚弹出时的系统白底；连上(OnConnected)才掀开。
-        // ★ 必须盖在"包裹了 _ax 的容器(axWrapper)"上，而不是和裸 _ax 当兄弟——裸 ActiveX 会盖过兄弟控件（之前盖不住的原因）。
+        // 必须盖在"包裹了 _ax 的容器(axWrapper)"上，而不是和裸 _ax 当兄弟——裸 ActiveX 会盖过兄弟控件。
         private readonly System.Windows.Forms.Panel _curtain = new()
         {
             Dock = System.Windows.Forms.DockStyle.Fill,
@@ -53,7 +52,7 @@ namespace ExHyperV.Tools
             _ax.CloseRequested += () => CloseRequested?.Invoke();
             _ax.FatalError += code => FatalError?.Invoke(code);
 
-            // ★ 必须在 BeginInit/EndInit 之前订阅——EndInit 可能同步创建句柄，晚订阅会错过事件。
+            // 必须在 BeginInit/EndInit 之前订阅——EndInit 可能同步创建句柄，晚订阅会错过事件。
             _ax.HandleCreated += (s, e) =>
             {
                 _ready = true;
@@ -98,11 +97,36 @@ namespace ExHyperV.Tools
 
         public void Disconnect() => _ax.DisconnectSafe();
 
+        /// <summary>
+        /// 关窗前安全拆除：断开 → 泵消息等会话静默(ConnectionState→0) → Dispose。
+        /// 须在窗口销毁前(OnClosing)调用：此时 UI 线程仍能泵消息，OnDisconnected 得以落地、会话线程退出，
+        /// 随后 Dispose 走到 AxHost.InPlaceDeactivate 时控件已静默、无需等内部状态，不会死锁。
+        /// 改在 OnClosed(WmDestroy 期)Dispose 则线程不泵消息且会话未静默，InPlaceDeactivate 死等 → UI 线程死锁。
+        /// </summary>
+        public void ShutdownAndDispose()
+        {
+            try
+            {
+                _ax.DisconnectSafe();
+                var deadline = DateTime.UtcNow.AddSeconds(3);   // localhost VMBus 断开通常 <1s，3s 为上限
+                while (_ax.ConnectionState != 0 && DateTime.UtcNow < deadline)
+                {
+                    System.Windows.Forms.Application.DoEvents();   // 泵 Win32 消息，让 OnDisconnected(COM 事件)落地
+                    System.Threading.Thread.Sleep(15);
+                }
+            }
+            catch { /* OCX 未就绪/已断开 */ }
+            Dispose();   // 会话已静默，InPlaceDeactivate 可干净完成
+        }
+
         /// <summary>增强会话改分辨率（不重连）。</summary>
-        public void Resize(int width, int height) => _ax.SetResolution(width, height);
+        public void Resize(int width, int height, double dpiScale) => _ax.SetResolution(width, height, dpiScale);
 
         /// <summary>动态开关 SmartSizing（基本会话：VM 分辨率超出画面区时开=缩放铺满，否则关=原生清晰）。</summary>
         public void SetSmartSizing(bool on) => _ax.SetSmartSizing(on);
+
+        /// <summary>基本会话缩放：设 mstscax 原生 ZoomLevel(百分比)。复刻 VMConnect 的 IMsRdpExtendedSettings("ZoomLevel")。</summary>
+        public void SetZoomLevel(uint percent) => _ax.SetZoomLevel(percent);
 
         /// <summary>同步全屏状态给底层控件（容器处理全屏时，按钮发起的全屏需要回灌给 mstscax，
         /// 使其内部状态/键盘捕获与窗口一致；热键发起的无需，由控件自身切换）。</summary>
