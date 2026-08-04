@@ -101,10 +101,19 @@ public static class VmProcessorService
                 SetIfChanged(procData, "EnablePerfmonPebs", newSettings.EnablePerfmonPebs, current.EnablePerfmonPebs);
                 SetIfChanged(procData, "EnablePerfmonIpt", newSettings.EnablePerfmonIpt, current.EnablePerfmonIpt);
 
-                SetIfChanged(procData, "ExtendedVirtualizationExtensions", newSettings.ExtendedVirtualizationExtensions, current.ExtendedVirtualizationExtensions);
+                if (newSettings.HardwareIsolationExtensionsEnabled != current.HardwareIsolationExtensionsEnabled
+                    && newSettings.HardwareIsolationExtensionsEnabled is { } hardwareIsolationEnabled)
+                {
+                    procData.TrySet<uint>("ExtendedVirtualizationExtensions", hardwareIsolationEnabled ? 1u : 0u);
+                }
                 SetIfChanged(procData, "MaxHwIsolatedGuests", newSettings.MaxHwIsolatedGuests, current.MaxHwIsolatedGuests);
                 SetIfChanged(procData, "MaxClusterCountPerSocket", newSettings.MaxClusterCountPerSocket, current.MaxClusterCountPerSocket);
                 SetIfChanged(procData, "MaxProcessorCountPerL3", newSettings.MaxProcessorCountPerL3, current.MaxProcessorCountPerL3);
+                SetIfChanged(procData, "MaxProcessorsPerNumaNode", newSettings.MaxProcessorsPerNumaNode, current.MaxProcessorsPerNumaNode);
+                SetIfChanged(procData, "MaxNumaNodesPerSocket", newSettings.MaxNumaNodesPerSocket, current.MaxNumaNodesPerSocket);
+                SetIfChanged(procData, "PhysicalAddressWidth", newSettings.PhysicalAddressWidth, current.PhysicalAddressWidth);
+                if (newSettings.LpiMode != current.LpiMode && newSettings.LpiMode is { } lpi)
+                    procData.TrySet<byte>("LpiMode", (byte)lpi);
 
                 return procData.GetText(TextFormat.CimDtd20);
             });
@@ -136,11 +145,13 @@ public static class VmProcessorService
                 Maximum = Convert.ToInt32(procData["Limit"]) / 1000,
                 RelativeWeight = Convert.ToInt32(procData["Weight"]),
 
-                ExposeVirtualizationExtensions = procData.TryGet<bool>("ExposeVirtualizationExtensions") ?? false,
-                EnableHostResourceProtection = procData.TryGet<bool>("EnableHostResourceProtection") ?? false,
+                ExposeVirtualizationExtensions = PBool(procData, "ExposeVirtualizationExtensions"),
+                EnableHostResourceProtection = PBool(procData, "EnableHostResourceProtection"),
                 CompatibilityForMigrationEnabled = procData.TryGet<bool>("LimitProcessorFeatures") ?? false,
                 CompatibilityForOlderOperatingSystemsEnabled = procData.TryGet<bool>("LimitCPUID") ?? false,
-                SmtMode = ConvertHwThreadsToSmtMode(Convert.ToUInt32(procData["HwThreadsPerCore"])),
+                SmtMode = procData.HasProperty("HwThreadsPerCore")
+                    ? ConvertHwThreadsToSmtMode(procData.TryGet<ulong>("HwThreadsPerCore") ?? 0UL)
+                    : null,
 
                 // 门控字段：用 P*(HasProperty ? 值 ?? 默认 : null) 读——令"值 null"仅代表"属性不在 schema(不支持)"，
                 // 避免高版本"属性存在但当前 VM 默认值 null"被 UI 的值-null 门控误灰（29617 上 Perfmon/调频项就是这样）。
@@ -169,10 +180,16 @@ public static class VmProcessorService
                 EnablePerfmonPebs = PBool(procData, "EnablePerfmonPebs"),
                 EnablePerfmonIpt = PBool(procData, "EnablePerfmonIpt"),
 
-                ExtendedVirtualizationExtensions = Nz(procData.TryGet<uint>("ExtendedVirtualizationExtensions")),
+                HardwareIsolationExtensionsEnabled = procData.HasProperty("ExtendedVirtualizationExtensions")
+                    ? (procData.TryGet<uint>("ExtendedVirtualizationExtensions") ?? 0u) != 0u
+                    : null,
                 MaxHwIsolatedGuests = Nz(procData.TryGet<uint>("MaxHwIsolatedGuests")),
                 MaxClusterCountPerSocket = Nz(procData.TryGet<uint>("MaxClusterCountPerSocket")),
                 MaxProcessorCountPerL3 = Nz(procData.TryGet<uint>("MaxProcessorCountPerL3")),
+                MaxProcessorsPerNumaNode = PULong(procData, "MaxProcessorsPerNumaNode"),
+                MaxNumaNodesPerSocket = PULong(procData, "MaxNumaNodesPerSocket"),
+                PhysicalAddressWidth = Nz(procData.TryGet<uint>("PhysicalAddressWidth")),
+                LpiMode = (LpiMode?)PByte(procData, "LpiMode"),
 
                 // 宿主实际存在的属性名集合(schema)，供频率字段 UI 门控判"支持"。
                 SupportedProps = new HashSet<string>(
@@ -193,11 +210,23 @@ public static class VmProcessorService
     private static bool? PBool(ManagementObject p, string n) => p.HasProperty(n) ? (p.TryGet<bool>(n) ?? false) : (bool?)null;
     private static byte? PByte(ManagementObject p, string n) => p.HasProperty(n) ? (p.TryGetByte(n) ?? (byte)0) : (byte?)null;
     private static uint? PUInt(ManagementObject p, string n) => p.HasProperty(n) ? (p.TryGet<uint>(n) ?? 0u) : (uint?)null;
+    private static ulong? PULong(ManagementObject p, string n) => p.HasProperty(n) ? (p.TryGet<ulong>(n) ?? 0UL) : (ulong?)null;
     private static string? PStr(ManagementObject p, string n) => p.HasProperty(n) ? (p.TryGetString(n) ?? "") : null;
 
-    private static SmtMode ConvertHwThreadsToSmtMode(uint hwThreads)
-        => hwThreads == 1 ? SmtMode.SingleThread : SmtMode.MultiThread;
+    private static SmtMode ConvertHwThreadsToSmtMode(ulong hwThreads)
+        => hwThreads switch
+        {
+            0 => SmtMode.Inherit,
+            1 => SmtMode.SingleThread,
+            _ => SmtMode.MultiThread,
+        };
 
     private static uint ConvertSmtModeToHwThreads(SmtMode smtMode)
-        => smtMode == SmtMode.SingleThread ? 1u : 2u;
+        => smtMode switch
+        {
+            SmtMode.Inherit => 0u,
+            SmtMode.SingleThread => 1u,
+            SmtMode.MultiThread => 2u,
+            _ => 0u,
+        };
 }

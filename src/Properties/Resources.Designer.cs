@@ -2068,6 +2068,15 @@ namespace ExHyperV.Properties {
                 return ResourceManager.GetString("Error_NvidiaRegistryProcessingException", resourceCulture);
             }
         }
+
+        /// <summary>
+        ///   查找类似 Error: Failed to import the NVIDIA registry information (exit code {0}). 的本地化字符串。
+        /// </summary>
+        public static string Error_NvidiaRegistryImportFailed {
+            get {
+                return ResourceManager.GetString("Error_NvidiaRegistryImportFailed", resourceCulture);
+            }
+        }
         
         /// <summary>
         ///   查找类似 Error: Failed to load the virtual machine registry offline. Please ensure the program is run with administrator privileges. 的本地化字符串。
@@ -4206,6 +4215,15 @@ namespace ExHyperV.Properties {
         public static string Msg_Gpu_AssignOk {
             get {
                 return ResourceManager.GetString("Msg_Gpu_AssignOk", resourceCulture);
+            }
+        }
+
+        /// <summary>
+        ///   查找类似 [Warning] The GPU partition created by this operation could not be identified. If a later step fails, automatic rollback will be skipped. 的本地化字符串。
+        /// </summary>
+        public static string Warn_Gpu_RollbackAdapterNotIdentified {
+            get {
+                return ResourceManager.GetString("Warn_Gpu_RollbackAdapterNotIdentified", resourceCulture);
             }
         }
         
@@ -8864,6 +8882,90 @@ namespace ExHyperV.Properties {
 
         public static string VmPage_MultiPurgeFail {
             get { return ResourceManager.GetString("VmPage_MultiPurgeFail", resourceCulture); }
+        }
+
+        public static string Cpu_MaxProcessorsPerNumaNode {
+            get { return ResourceManager.GetString("Cpu_MaxProcessorsPerNumaNode", resourceCulture); }
+        }
+
+        public static string Cpu_MaxProcessorsPerNumaNodeDesc {
+            get { return ResourceManager.GetString("Cpu_MaxProcessorsPerNumaNodeDesc", resourceCulture); }
+        }
+
+        public static string Cpu_MaxNumaNodesPerSocket {
+            get { return ResourceManager.GetString("Cpu_MaxNumaNodesPerSocket", resourceCulture); }
+        }
+
+        public static string Cpu_MaxNumaNodesPerSocketDesc {
+            get { return ResourceManager.GetString("Cpu_MaxNumaNodesPerSocketDesc", resourceCulture); }
+        }
+
+        public static string Cpu_PhysicalAddressWidth {
+            get { return ResourceManager.GetString("Cpu_PhysicalAddressWidth", resourceCulture); }
+        }
+
+        public static string Cpu_PhysicalAddressWidthDesc {
+            get { return ResourceManager.GetString("Cpu_PhysicalAddressWidthDesc", resourceCulture); }
+        }
+
+        public static string Cpu_LpiMode {
+            get { return ResourceManager.GetString("Cpu_LpiMode", resourceCulture); }
+        }
+
+        public static string Cpu_LpiModeDesc {
+            get { return ResourceManager.GetString("Cpu_LpiModeDesc", resourceCulture); }
+        }
+
+        public static string CpuEnum_Lpi_Default {
+            get { return ResourceManager.GetString("CpuEnum_Lpi_Default", resourceCulture); }
+        }
+
+        public static string CpuEnum_Lpi_Disabled {
+            get { return ResourceManager.GetString("CpuEnum_Lpi_Disabled", resourceCulture); }
+        }
+
+        public static string CpuEnum_Lpi_Enabled {
+            get { return ResourceManager.GetString("CpuEnum_Lpi_Enabled", resourceCulture); }
+        }
+
+        public static string VmPcie_Title {
+            get { return ResourceManager.GetString("VmPcie_Title", resourceCulture); }
+        }
+
+        public static string VmPcie_Hint {
+            get { return ResourceManager.GetString("VmPcie_Hint", resourceCulture); }
+        }
+
+        public static string VmRAMSettings_MmioSection {
+            get { return ResourceManager.GetString("VmRAMSettings_MmioSection", resourceCulture); }
+        }
+
+        public static string VmRAMSettings_LowMmioSize {
+            get { return ResourceManager.GetString("VmRAMSettings_LowMmioSize", resourceCulture); }
+        }
+
+        public static string VmRAMSettings_LowMmioSizeDesc {
+            get { return ResourceManager.GetString("VmRAMSettings_LowMmioSizeDesc", resourceCulture); }
+        }
+
+        public static string VmRAMSettings_HighMmioSize {
+            get { return ResourceManager.GetString("VmRAMSettings_HighMmioSize", resourceCulture); }
+        }
+
+        public static string VmRAMSettings_HighMmioSizeDesc {
+            get { return ResourceManager.GetString("VmRAMSettings_HighMmioSizeDesc", resourceCulture); }
+        }
+
+        public static string VmRAMSettings_HighMmioBase {
+            get { return ResourceManager.GetString("VmRAMSettings_HighMmioBase", resourceCulture); }
+        }
+
+        public static string Common_ClassListSeparator {
+            get { return ResourceManager.GetString("Common_ClassListSeparator", resourceCulture); }
+        }
+
+        public static string PCIePage_ClassWithChildTypes {
+            get { return ResourceManager.GetString("PCIePage_ClassWithChildTypes", resourceCulture); }
         }
 
     }

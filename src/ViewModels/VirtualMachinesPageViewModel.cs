@@ -20,7 +20,7 @@ namespace ExHyperV.ViewModels
         Dashboard, CpuSettings, CpuAffinity, MemorySettings, StorageSettings, AddStorage,
         GpuSettings,
         AddGpuSelect,
-        AddGpuProgress, NetworkSettings, BootSettings, SpacetimeSettings, Advanced, Security
+        AddGpuProgress, NetworkSettings, BootSettings, SpacetimeSettings, Advanced, Security, PcieSettings
     }
     public partial class VirtualMachinesPageViewModel : PageViewModelBase, IDisposable
     {
@@ -141,6 +141,7 @@ namespace ExHyperV.ViewModels
                 case VmDetailViewType.StorageSettings:
                 case VmDetailViewType.NetworkSettings:
                 case VmDetailViewType.SpacetimeSettings:
+                case VmDetailViewType.PcieSettings:
                     CurrentViewType = VmDetailViewType.Dashboard;
                     break;
                 default:
@@ -375,6 +376,7 @@ namespace ExHyperV.ViewModels
         partial void OnSelectedVmChanged(VmInstanceViewModel value)
         {
             _originalMemorySettingsCache = null;
+            _originalMmioSettingsCache = null;
             HostDisks.Clear();
             if (value == null) { CurrentViewType = VmDetailViewType.Dashboard; return; }
             IsCreatingVm = false;
@@ -393,6 +395,7 @@ namespace ExHyperV.ViewModels
                 case VmDetailViewType.Advanced: _ = GoToAdvancedSettingsCommand.ExecuteAsync(null); break;
                 case VmDetailViewType.Security: _ = GoToSecuritySettingsCommand.ExecuteAsync(null); break;
                 case VmDetailViewType.GpuSettings: _ = GoToGpuSettingsCommand.ExecuteAsync(null); break;
+                case VmDetailViewType.PcieSettings: _ = GoToPcieSettingsCommand.ExecuteAsync(null); break;
                 default:
                     CurrentViewType = VmDetailViewType.Dashboard;
                     _ = RefreshBootOrderForSelectedVmAsync(value);

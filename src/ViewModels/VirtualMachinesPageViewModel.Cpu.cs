@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Management;
+using System.Runtime.InteropServices;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ExHyperV.Models;
@@ -19,13 +20,15 @@ namespace ExHyperV.ViewModels
         [ObservableProperty] private int _affinityRows = 1;
 
         // 新增 CPU 字段的枚举下拉源（绑 ComboBox.ItemsSource）
+        public Array SmtModeValues { get; } = Enum.GetValues(typeof(SmtMode));
         public Array ApicModeValues { get; } = Enum.GetValues(typeof(VmApicMode));
         public Array L3DistributionPolicyValues { get; } = Enum.GetValues(typeof(L3DistributionPolicy));
         public Array PageShatterModeValues { get; } = Enum.GetValues(typeof(PageShatterMode));
-
+        public Array LpiModeValues { get; } = Enum.GetValues(typeof(LpiMode));
         // 能力门控标志（按宿主硬件置灰：AMD-only / 硬件隔离）
         [ObservableProperty] private bool _isAmdHost;
         [ObservableProperty] private bool _isHwIsolationSupported;
+        public bool IsArm64Host { get; } = RuntimeInformation.OSArchitecture == Architecture.Arm64;
         private bool _cpuCapsInit;
 
 
