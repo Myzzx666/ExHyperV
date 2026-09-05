@@ -9,17 +9,19 @@ namespace ExHyperV.ViewModels
 {
     public partial class ConsoleViewModel : ObservableObject, IDisposable
     {
-        // ===== 字段 =====
 
         private readonly VmQueryService _queryService = new();
         private DispatcherTimer _statusTimer = null!;
         private bool _polling;   // 防止上一次轮询(WMI 慢)未完成时重入
+        private const int DefaultEnhancedWidth = 1920;
+        private const int DefaultEnhancedHeight = 1080;
 
-        // ===== 基础属性 =====
 
         [ObservableProperty] private string _vmId;
         [ObservableProperty] private string _vmName;
         [ObservableProperty] private bool _isRunning;
+        public int InitialEnhancedWidth { get; }
+        public int InitialEnhancedHeight { get; }
         
         [ObservableProperty]
         [NotifyPropertyChangedFor(nameof(IsNotBusy))]
@@ -37,7 +39,6 @@ namespace ExHyperV.ViewModels
         /// <summary>每次状态轮询完成后触发（供消费方按 VM 运行状态同步连接，无需额外定时器）。</summary>
         public event Action? Polled;
 
-        // ===== 构造 =====
 
         public ConsoleViewModel(string vmId, string vmName)
         {
@@ -49,21 +50,22 @@ namespace ExHyperV.ViewModels
             else if (!string.IsNullOrEmpty(savedZoom) && ZoomOptions.Contains(savedZoom)) SelectedZoom = savedZoom;
             // 使用保存的分辨率直接建立增强会话；无保存值时先由基本会话取得分辨率。
             _preferEnhanced = SettingsService.GetDefaultConnectionMode() == ModeEnhancedToken;
-            if (_preferEnhanced && SettingsService.GetDefaultConsoleResolution() is { } res)
+            var savedResolution = SettingsService.GetDefaultConsoleResolution();
+            InitialEnhancedWidth = savedResolution?.Width ?? DefaultEnhancedWidth;
+            InitialEnhancedHeight = savedResolution?.Height ?? DefaultEnhancedHeight;
+            if (_preferEnhanced)
             {
-                _currentWidth = res.Width;
-                _currentHeight = res.Height;
+                _currentWidth = InitialEnhancedWidth;
+                _currentHeight = InitialEnhancedHeight;
             }
             StartStatusPolling();
         }
-        // ===== 全屏 =====
 
         [ObservableProperty] private bool _isFullScreen = false;
 
         [RelayCommand]
         private void ToggleFullScreen() => IsFullScreen = !IsFullScreen;
 
-        // ===== 状态轮询 =====
 
         private void StartStatusPolling()
         {
@@ -110,7 +112,6 @@ namespace ExHyperV.ViewModels
             }
             Polled?.Invoke();   // 通知消费方按最新 VM 运行状态同步 RDP 连接（连/断/重连）
         }
-        // ===== 电源控制 =====
 
         private bool CanExecutePowerAction() => !IsBusy;
 
@@ -161,7 +162,6 @@ namespace ExHyperV.ViewModels
             SendCadRequested?.Invoke(this, EventArgs.Empty);
         }
 
-        // ===== 分辨率 =====
 
         [ObservableProperty] private string _selectedResolution = "-";
         [ObservableProperty] private int _currentWidth;
@@ -190,7 +190,6 @@ namespace ExHyperV.ViewModels
             "1280 x 720",  "1152 x 864",  "1024 x 768",  "800 x 600"
         };
 
-        // ===== 缩放（仅基本会话）=====
         // 基本会话是固定分辨率的合成显示，只能拉伸缩放（放大必糊）；增强会话画面已原生跟随窗口，无需缩放。
         // 档值：本地化"适应窗口" + 纯比例字符串。窗口端 LayoutRdpHost 解析后摆放 RdpHost + 开关滚动条。
         // 默认 100%：mstscax 自带全屏热键(Ctrl+Alt+Enter)仅在 ZoomLevel=100 时有效，默认 100% 让热键开箱即用；
@@ -215,7 +214,6 @@ namespace ExHyperV.ViewModels
             SettingsService.SaveDefaultZoom(zoom == Properties.Resources.ConsoleWindow_ZoomAuto ? ZoomAutoToken : zoom);
         }
 
-        // ===== 会话模式 =====
 
         private const string ModeEnhancedToken = "enhanced";   // 配置文件里的语言中立 token
         private const string ModeBasicToken = "basic";
@@ -251,16 +249,13 @@ namespace ExHyperV.ViewModels
 
         partial void OnIsRunningChanged(bool value)
         {
-            // 如果虚拟机停止运行
             if (!value)
             {
                 // 重置宽高
                 _currentWidth = 0;
                 _currentHeight = 0;
-                // 直接设置字符串为 "-"
                 SelectedResolution = "-";
 
-                // 通知 UI 宽高已更改（如果 UI 有绑定这两个值）
                 OnPropertyChanged(nameof(CurrentWidth));
                 OnPropertyChanged(nameof(CurrentHeight));
             }

@@ -4,6 +4,7 @@ using ExHyperV.Services;
 using ExHyperV.Interaction;
 using ExHyperV.Tools;
 using System.Collections.ObjectModel;
+using System.Text.RegularExpressions;
 using Wpf.Ui.Controls;
 
 namespace ExHyperV.ViewModels
@@ -12,11 +13,9 @@ namespace ExHyperV.ViewModels
 
     public partial class HostPageViewModel : PageViewModelBase
     {
-        // ===== 字段与状态 =====
 
         private bool _isInitialized = false;
 
-        // ===== 绑定属性 =====
 
         public CheckStatusViewModel SystemStatus { get; } = new("");
         public CheckStatusViewModel CpuStatus { get; } = new("");
@@ -36,13 +35,35 @@ namespace ExHyperV.ViewModels
         [ObservableProperty] private bool _isNativeNvmeEnabled;
         [ObservableProperty] private bool _isNativeNvmeToggleEnabled = false;
         [ObservableProperty] private bool _isNativeNvmeSupported;
+        [ObservableProperty] private bool _isOpenHclFirmwareFileEnabled;
+        [ObservableProperty] private bool _isVolumeAutoMountEnabled;
+        [ObservableProperty] private bool _isVolumeAutoMountToggleEnabled;
         [ObservableProperty] private bool _isServerSystem;
         [ObservableProperty] private bool _isSystemSwitchEnabled = false;
 
         // 有挂起的版本切换任务（重启前不可再切，开关保持禁用）
         private bool _hasPendingSwitch = false;
         [ObservableProperty] private bool _isNumaSpanningEnabled;
+        [ObservableProperty] private bool _isNumaSpanningToggleEnabled;
+        [ObservableProperty] private bool _isEnhancedSessionModeEnabled;
+        [ObservableProperty] private bool _isEnhancedSessionModeToggleEnabled;
+        [ObservableProperty] private string _defaultVirtualMachinePath = string.Empty;
+        [ObservableProperty] private string _defaultVirtualHardDiskPath = string.Empty;
+        [ObservableProperty] private bool _areDefaultPathsEnabled;
+        [ObservableProperty]
+        [NotifyCanExecuteChangedFor(nameof(ApplyDynamicMacRangeCommand))]
+        private string _minimumDynamicMacAddress = string.Empty;
+        [ObservableProperty]
+        [NotifyCanExecuteChangedFor(nameof(ApplyDynamicMacRangeCommand))]
+        private string _maximumDynamicMacAddress = string.Empty;
+        [ObservableProperty]
+        [NotifyCanExecuteChangedFor(nameof(ApplyDynamicMacRangeCommand))]
+        private bool _isDynamicMacRangeEnabled;
+        [ObservableProperty]
+        [NotifyCanExecuteChangedFor(nameof(ApplyDynamicMacRangeCommand))]
+        private bool _isApplyingDynamicMacRange;
         [ObservableProperty] private HyperVSchedulerType _currentSchedulerType;
+        [ObservableProperty] private Guid? _currentPowerPlanId;
 
         public ObservableCollection<SchedulerMode> SchedulerModes { get; } = new()
         {
@@ -51,7 +72,8 @@ namespace ExHyperV.ViewModels
             new SchedulerMode(Properties.Resources.Scheduler_Root, HyperVSchedulerType.Root)
         };
 
-        // ===== 构造与初始化检查 =====
+        public ObservableCollection<HostPowerPlan> PowerPlans { get; } = new();
+
 
         public HostPageViewModel() => LoadInitialStatusAsync().SafeFireAndForget();
 
@@ -117,6 +139,7 @@ namespace ExHyperV.ViewModels
             IsGpuStrategyEnabled = await Task.Run(() => HyperVHostService.GetGpuStrategyEnabled());
             IsNativeNvmeSupported = Environment.OSVersion.Version.Build >= 26100; // WS2025 / Win11 24H2 起才有原生 NVMe
             IsNativeNvmeEnabled = await Task.Run(() => HostNvmeService.IsNativeNvmeEnabled());
+            IsOpenHclFirmwareFileEnabled = await Task.Run(() => HostOpenHclService.IsFirmwareLoadFromFileEnabled());
             InitializeProductType();
             await LoadAdvancedConfigAsync();
             IsGpuStrategyToggleEnabled = true;
@@ -129,17 +152,39 @@ namespace ExHyperV.ViewModels
 
         private async Task LoadAdvancedConfigAsync()
         {
+            VolumeAutoMountState autoMount = await Task.Run(HostVolumeAutoMountService.GetState);
+            IsVolumeAutoMountEnabled = autoMount.Enabled;
+            IsVolumeAutoMountToggleEnabled = autoMount.Success;
+
             try
             {
-                bool numa = await HyperVNumaService.GetNumaSpanningEnabledAsync();
+                var numaTask = HyperVNumaService.GetNumaSpanningEnabledAsync();
+                var hostSettingsTask = HyperVHostSettingsService.GetAsync();
+                var powerPlansTask = Task.Run(() =>
+                    (Plans: HostPowerPlanService.GetPowerPlans(), ActiveId: HostPowerPlanService.GetActivePowerPlanId()));
                 var sched = await Task.Run(() => HyperVSchedulerService.GetSchedulerType());
-                IsNumaSpanningEnabled = numa;
+                bool? numa = await numaTask;
+                HyperVHostSettings? hostSettings = await hostSettingsTask;
+                var powerPlans = await powerPlansTask;
+                IsNumaSpanningEnabled = numa ?? false;
+                IsNumaSpanningToggleEnabled = HyperVStatus.IsSuccess == true && numa.HasValue;
+                IsEnhancedSessionModeEnabled = hostSettings?.EnhancedSessionModeEnabled ?? false;
+                IsEnhancedSessionModeToggleEnabled = HyperVStatus.IsSuccess == true && hostSettings != null;
+                DefaultVirtualMachinePath = hostSettings?.DefaultVirtualMachinePath ?? string.Empty;
+                DefaultVirtualHardDiskPath = hostSettings?.DefaultVirtualHardDiskPath ?? string.Empty;
+                AreDefaultPathsEnabled = HyperVStatus.IsSuccess == true && hostSettings != null;
+                MinimumDynamicMacAddress = FormatDynamicMacAddress(hostSettings?.MinimumMacAddress);
+                MaximumDynamicMacAddress = FormatDynamicMacAddress(hostSettings?.MaximumMacAddress);
+                IsDynamicMacRangeEnabled = HyperVStatus.IsSuccess == true && hostSettings != null;
                 CurrentSchedulerType = sched == HyperVSchedulerType.Unknown ? HyperVSchedulerType.Classic : sched;
+                PowerPlans.Clear();
+                foreach (HostPowerPlan plan in powerPlans.Plans)
+                    PowerPlans.Add(plan);
+                CurrentPowerPlanId = powerPlans.ActiveId;
             }
             catch { }
         }
 
-        // ===== 属性变更处理 =====
 
         partial void OnIsGpuStrategyEnabledChanged(bool value)
         {
@@ -154,9 +199,43 @@ namespace ExHyperV.ViewModels
             ShowRestartPrompt(Properties.Resources.Msg_Host_NativeNvmeChanged);
         }
 
-        partial void OnIsNumaSpanningEnabledChanged(bool value)
+        partial void OnIsOpenHclFirmwareFileEnabledChanged(bool value)
         {
             if (!_isInitialized) return;
+
+            var result = HostOpenHclService.SetFirmwareLoadFromFileEnabled(value);
+            if (result.Success) return;
+
+            ShowError(string.Format(Properties.Resources.Error_Host_OpenHclRegistryChangeFailed, result.Error));
+            _isInitialized = false;
+            IsOpenHclFirmwareFileEnabled = !value;
+            _isInitialized = true;
+        }
+
+        partial void OnIsVolumeAutoMountEnabledChanged(bool value)
+        {
+            if (!_isInitialized || !IsVolumeAutoMountToggleEnabled) return;
+            ApplyVolumeAutoMountStateAsync(value).SafeFireAndForget();
+        }
+
+        private async Task ApplyVolumeAutoMountStateAsync(bool enabled)
+        {
+            IsVolumeAutoMountToggleEnabled = false;
+            var result = await HostVolumeAutoMountService.SetEnabledAsync(enabled);
+            VolumeAutoMountState actual = HostVolumeAutoMountService.GetState();
+
+            _isInitialized = false;
+            IsVolumeAutoMountEnabled = actual.Success ? actual.Enabled : !enabled;
+            IsVolumeAutoMountToggleEnabled = actual.Success;
+            _isInitialized = true;
+
+            if (!result.Success)
+                ShowError(string.Format(Properties.Resources.Error_Host_AutoMountChangeFailed, result.Error));
+        }
+
+        partial void OnIsNumaSpanningEnabledChanged(bool value)
+        {
+            if (!_isInitialized || !IsNumaSpanningToggleEnabled) return;
             _ = Task.Run(async () =>
             {
                 var (ok, msg) = await HyperVNumaService.SetNumaSpanningEnabledAsync(value);
@@ -167,6 +246,25 @@ namespace ExHyperV.ViewModels
                     {
                         _isInitialized = false;
                         IsNumaSpanningEnabled = !value;
+                        _isInitialized = true;
+                    });
+                }
+            });
+        }
+
+        partial void OnIsEnhancedSessionModeEnabledChanged(bool value)
+        {
+            if (!_isInitialized || !IsEnhancedSessionModeToggleEnabled) return;
+            _ = Task.Run(async () =>
+            {
+                var result = await HyperVHostSettingsService.SetEnhancedSessionModeEnabledAsync(value);
+                if (!result.Success)
+                {
+                    ShowError(result.Error);
+                    Application.Current.Dispatcher.Invoke(() =>
+                    {
+                        _isInitialized = false;
+                        IsEnhancedSessionModeEnabled = !value;
                         _isInitialized = true;
                     });
                 }
@@ -194,13 +292,122 @@ namespace ExHyperV.ViewModels
             });
         }
 
+        partial void OnCurrentPowerPlanIdChanged(Guid? value)
+        {
+            if (!_isInitialized || !value.HasValue) return;
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    HostPowerPlanService.SetActivePowerPlan(value.Value);
+                }
+                catch (Exception ex)
+                {
+                    ShowError(string.Format(Properties.Resources.Error_Host_PowerPlanFail, ex.Message));
+                    Guid? actual = HostPowerPlanService.GetActivePowerPlanId();
+                    Application.Current.Dispatcher.Invoke(() =>
+                    {
+                        _isInitialized = false;
+                        CurrentPowerPlanId = actual;
+                        _isInitialized = true;
+                    });
+                }
+            });
+        }
+
         partial void OnIsServerSystemChanged(bool value)
         {
             if (!_isInitialized) return;
             SwitchSystemVersion(value);
         }
 
-        // ===== 命令 =====
+        [RelayCommand]
+        private async Task BrowseDefaultVirtualMachinePathAsync()
+        {
+            string? picked = Dialogs.PickFolder(
+                Properties.Resources.HostPage_SelectDefaultVirtualMachinePath,
+                string.IsNullOrWhiteSpace(DefaultVirtualMachinePath) ? null : DefaultVirtualMachinePath);
+            if (picked == null || string.Equals(picked, DefaultVirtualMachinePath, StringComparison.OrdinalIgnoreCase)) return;
+
+            var result = await HyperVHostSettingsService.SetDefaultVirtualMachinePathAsync(picked);
+            if (result.Success)
+                DefaultVirtualMachinePath = picked;
+            else
+                ShowError(result.Error);
+        }
+
+        [RelayCommand]
+        private async Task BrowseDefaultVirtualHardDiskPathAsync()
+        {
+            string? picked = Dialogs.PickFolder(
+                Properties.Resources.HostPage_SelectDefaultVirtualHardDiskPath,
+                string.IsNullOrWhiteSpace(DefaultVirtualHardDiskPath) ? null : DefaultVirtualHardDiskPath);
+            if (picked == null || string.Equals(picked, DefaultVirtualHardDiskPath, StringComparison.OrdinalIgnoreCase)) return;
+
+            var result = await HyperVHostSettingsService.SetDefaultVirtualHardDiskPathAsync(picked);
+            if (result.Success)
+                DefaultVirtualHardDiskPath = picked;
+            else
+                ShowError(result.Error);
+        }
+
+        private bool CanApplyDynamicMacRange() => IsDynamicMacRangeEnabled && !IsApplyingDynamicMacRange;
+
+        [RelayCommand(CanExecute = nameof(CanApplyDynamicMacRange))]
+        private async Task ApplyDynamicMacRangeAsync()
+        {
+            string? minimum = NormalizeDynamicMacAddress(MinimumDynamicMacAddress);
+            string? maximum = NormalizeDynamicMacAddress(MaximumDynamicMacAddress);
+            if (minimum == null || maximum == null)
+            {
+                ShowError(Properties.Resources.Error_Host_DynamicMacRangeInvalid);
+                return;
+            }
+
+            if (string.CompareOrdinal(minimum, maximum) > 0)
+            {
+                ShowError(Properties.Resources.Error_Host_DynamicMacRangeOrder);
+                return;
+            }
+
+            IsApplyingDynamicMacRange = true;
+            try
+            {
+                var result = await HyperVHostSettingsService.SetDynamicMacAddressRangeAsync(minimum, maximum);
+                if (!result.Success)
+                {
+                    ShowError(result.Error);
+                    return;
+                }
+
+                MinimumDynamicMacAddress = FormatDynamicMacAddress(minimum);
+                MaximumDynamicMacAddress = FormatDynamicMacAddress(maximum);
+                ShowSuccess(Properties.Resources.Msg_Host_DynamicMacRangeApplied);
+            }
+            finally
+            {
+                IsApplyingDynamicMacRange = false;
+            }
+        }
+
+        private static string? NormalizeDynamicMacAddress(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return null;
+            string trimmed = value.Trim();
+            if (!Regex.IsMatch(trimmed, "^(?:[0-9A-Fa-f]{12}|(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2})$"))
+                return null;
+
+            return Regex.Replace(trimmed, "[:-]", string.Empty).ToUpperInvariant();
+        }
+
+        private static string FormatDynamicMacAddress(string? value)
+        {
+            string? normalized = NormalizeDynamicMacAddress(value);
+            return normalized == null
+                ? value ?? string.Empty
+                : string.Join("-", Enumerable.Range(0, 6).Select(i => normalized.Substring(i * 2, 2)));
+        }
+
 
         [RelayCommand]
         private async Task DisableHyperVAsync()
@@ -232,7 +439,6 @@ namespace ExHyperV.ViewModels
             ShowRestartPrompt(Properties.Resources.Msg_Host_EnableSuccess);
         }
 
-        // ===== 系统版本切换 =====
 
         private void InitializeProductType()
         {
@@ -331,7 +537,6 @@ namespace ExHyperV.ViewModels
 
     }
 
-    // ===== 检查项状态子 VM =====
 
     public partial class CheckStatusViewModel : ObservableObject
     {

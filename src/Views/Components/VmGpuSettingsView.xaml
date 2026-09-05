@@ -21,7 +21,6 @@
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
-        <!-- 1. 顶部标题栏：下边距从 24 减小到 8，使卡片上移 -->
         <Grid Grid.Row="0" Margin="24,16,24,12">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
@@ -47,7 +46,6 @@
             </Grid>
 
 
-        <!-- 2. 显卡列表区域 -->
         <Grid Grid.Row="1" Margin="24,0,24,24">
             <ScrollViewer VerticalScrollBarVisibility="Auto" PanningMode="VerticalOnly">
                 <StackPanel>
@@ -109,7 +107,7 @@
                                         <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding Vendor}" FontSize="16" VerticalAlignment="Center"/>
 
                                         <TextBlock Grid.Row="1" Grid.Column="0" Text="{x:Static properties:Resources.Label_Ram}" FontSize="16" VerticalAlignment="Center" Foreground="{ui:ThemeResource TextFillColorSecondaryBrush}"/>
-                                        <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding RamDisplay}" FontSize="16" VerticalAlignment="Center"/>
+                                        <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding MemoryDisplay}" FontSize="16" VerticalAlignment="Center"/>
 
                                         <TextBlock Grid.Row="2" Grid.Column="0" Text="{x:Static properties:Resources.Label_DriverVer}" FontSize="16" VerticalAlignment="Center" Foreground="{ui:ThemeResource TextFillColorSecondaryBrush}"/>
                                         <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding DriverVersion}" FontSize="16" VerticalAlignment="Center"/>
@@ -118,7 +116,7 @@
                                         <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding AdapterId}" FontSize="16" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
 
                                         <TextBlock Grid.Row="4" Grid.Column="0" Text="{x:Static properties:Resources.Label_GpuPartitionPath}" FontSize="16" VerticalAlignment="Center" Foreground="{ui:ThemeResource TextFillColorSecondaryBrush}"/>
-                                        <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding PName}" FontSize="16" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                                        <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding PartitionableGpuPath}" FontSize="16" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
 
 
                                     </Grid>

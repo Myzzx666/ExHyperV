@@ -20,16 +20,15 @@ namespace ExHyperV.ViewModels
         Dashboard, CpuSettings, CpuAffinity, MemorySettings, StorageSettings, AddStorage,
         GpuSettings,
         AddGpuSelect,
-        AddGpuProgress, NetworkSettings, BootSettings, SpacetimeSettings, Advanced, Security, PcieSettings
+        AddGpuProgress, NetworkSettings, BootSettings, SpacetimeSettings, Advanced, Security, PcieSettings,
+        Export
     }
     public partial class VirtualMachinesPageViewModel : PageViewModelBase, IDisposable
     {
-        // ===== 私有服务字段与依赖注入 =====
         private readonly VmQueryService _queryService;
         private readonly VmGpuService _vmGpuService;
 
 
-        // ===== 监控与后台任务字段 =====
         private CpuMonitorService _cpuService = null!;
         private CancellationTokenSource? _monitoringCts;
         private DispatcherTimer _uiTimer;
@@ -41,14 +40,12 @@ namespace ExHyperV.ViewModels
         private readonly Dictionary<Guid, (string NewName, DateTime Expiry)> _renameLockouts = new();
 
 
-        // ===== 缓存与状态字段 =====
         private const int MaxHistoryLength = 60;
         private readonly Dictionary<string, LinkedList<double>> _historyCache = new();
         // 程序性赋值抑制统一改用基类 SuppressApply()/IsApplySuppressed（原 _isInternalUpdating）。
         // _originalMemorySettingsCache 归 Memory.cs、_isDiskPathManual 归 Create.cs（功能私有，不再堆在核心）。
 
 
-        // ===== 视图模型属性 - 页面状态 =====
         [ObservableProperty] private bool _isLoading = true;
         [ObservableProperty] private bool _isLoadingSettings;
         [ObservableProperty]
@@ -57,18 +54,16 @@ namespace ExHyperV.ViewModels
 
         // 进行中的向导/部署视图(选卡、GPU-PV 部署、加存储)绑死某台 VM，期间禁用左侧列表：
         // 防止切走后工作流后续步骤读到的 SelectedVm 变成别的 VM，把关机/挂卡等操作打到错的机器上。
-        public bool IsVmListEnabled => CurrentViewType is not
+        public bool IsVmListEnabled => !IsExporting && !IsPreparingVmImport && !IsExecutingVmImport && CurrentViewType is not
             (VmDetailViewType.AddGpuSelect or VmDetailViewType.AddGpuProgress or VmDetailViewType.AddStorage);
         [ObservableProperty] private string _searchText = string.Empty;
 
 
-        // ===== 视图模型属性 - 虚拟机列表与选择 =====
         [ObservableProperty] private ObservableCollection<VmInstanceViewModel> _vmList = new();
         [ObservableProperty] private VmInstanceViewModel _selectedVm;
         [ObservableProperty] private BitmapSource? _thumbnail;
 
 
-        // ===== 构造函数与资源释放 =====
 
         // Linux 部署字段
 
@@ -103,13 +98,12 @@ namespace ExHyperV.ViewModels
             _monitoringCts?.Cancel();
             _cpuService?.Dispose();
             _uiTimer?.Stop();
+            _ = DisposeVmImportSessionAsync();
             // 不在此 Dispose 嗅探单例(全进程共用,退出时由其 ProcessExit 钩子清理)
         }
 
 
-        // ===== 导航与页面状态控制 =====
 
-        // 搜索框文本变化时的过滤逻辑
         partial void OnSearchTextChanged(string value)
         {
             var view = CollectionViewSource.GetDefaultView(VmList);
@@ -120,7 +114,6 @@ namespace ExHyperV.ViewModels
             }
         }
 
-        // 返回仪表盘
         [RelayCommand]
         private void GoBackToDashboard() => CurrentViewType = VmDetailViewType.Dashboard;
 
@@ -151,7 +144,6 @@ namespace ExHyperV.ViewModels
         }
 
 
-        // ===== 虚拟机列表与操作 =====
 
         [RelayCommand]
         private async Task OpenVmFolderAsync(VmInstanceViewModel vm)
@@ -163,6 +155,14 @@ namespace ExHyperV.ViewModels
 
                 if (!string.IsNullOrEmpty(path) && Directory.Exists(path))
                 {
+                    // 资源管理器会复用普通权限的桌面进程，因此打开默认 Hyper-V 配置目录前需补充当前用户的只读权限。
+                    var access = VmFolderAccessService.EnsureExplorerCanRead(path);
+                    if (!access.Success)
+                    {
+                        ShowError($"{Properties.Resources.VmPage_OpenFail}：{access.Error}");
+                        return;
+                    }
+
                     Shell.Reveal(path);
                 }
                 else
@@ -205,9 +205,9 @@ namespace ExHyperV.ViewModels
             var targets = _selectedVms.ToList();
             if (targets.Count == 0) return;
             bool allRunning = targets.All(v => v.IsRunning);
-            string action = allRunning ? "Stop" : "Start";                    // 与单机右键/主按钮一致：Stop=优雅失败则硬关
+            string action = allRunning ? "Stop" : "Start";
             var toAct = (allRunning ? targets.Where(v => v.IsRunning) : targets.Where(v => !v.IsRunning)).ToList();
-            // 复用每台自己的 ControlCommand：连带 transient 态、状态回同步、开机失败的反应式修复都照走。
+            // 复用各虚拟机的 ControlCommand，保持状态同步和启动失败处理一致。
             await Task.WhenAll(toAct.Select(v => v.ControlCommand?.ExecuteAsync(action) ?? Task.CompletedTask));
             OnPropertyChanged(nameof(MultiPowerToggleText));
         }
@@ -221,7 +221,7 @@ namespace ExHyperV.ViewModels
 
             try
             {
-                var result = await VmDeleteService.DeleteVmAsync(vm.Name);
+                var result = await VmDeleteService.DeleteVmAsync(vm.Name, vm.Id);
                 if (result.Success)
                 {
                     VmList.Remove(vm);
@@ -239,7 +239,7 @@ namespace ExHyperV.ViewModels
             finally { IsLoading = false; }
         }
 
-        // 批量删除（保留磁盘）：确认 → 逐台删 → 聚合汇报 → 收拾选中项。
+        // 批量删除（保留完整配置与磁盘）：确认 → 逐台删 → 聚合汇报 → 收拾选中项。
         private async Task DeleteMultipleAsync(List<VmInstanceViewModel> targets)
         {
             if (targets.Count == 0) return;
@@ -255,7 +255,7 @@ namespace ExHyperV.ViewModels
                 int okCount = 0;
                 foreach (var t in targets)
                 {
-                    var r = await VmDeleteService.DeleteVmAsync(t.Name);
+                    var r = await VmDeleteService.DeleteVmAsync(t.Name, t.Id);
                     if (r.Success) { VmList.Remove(t); okCount++; }
                 }
                 if (SelectedVm != null && !VmList.Contains(SelectedVm)) SelectedVm = VmList.FirstOrDefault();
@@ -266,7 +266,7 @@ namespace ExHyperV.ViewModels
             finally { IsLoading = false; }
         }
 
-        // 批量彻底删除：不逐台展开文件预览（台数多会撑爆），改用名称清单确认 → 逐台彻底删 → 聚合汇报。
+        // 批量彻底删除仅展示名称清单，避免文件预览过长。
         private async Task PurgeMultipleAsync(List<VmInstanceViewModel> targets)
         {
             if (targets.Count == 0) return;
@@ -302,22 +302,69 @@ namespace ExHyperV.ViewModels
 
             // 二次确认弹窗：预先算出"将删除的目录与文件"清单直接展示——替代口头提醒用户自己去查目录里有没有其他文件。
             var preview = await VmDeleteService.PreviewPurgeAsync(vm.Id);
-            var list = new System.Text.StringBuilder();
-            if (!string.IsNullOrEmpty(preview.ConfigDir))
+            var listText = new System.Windows.Controls.TextBlock
             {
-                list.AppendLine("· " + preview.ConfigDir);
-                int shown = 0;
-                foreach (var f in preview.ConfigDirFiles)
-                {
-                    if (shown++ >= 40) { list.AppendLine($"     · … (+{preview.ConfigDirFiles.Count - 40})"); break; }
-                    list.AppendLine("     · " + System.IO.Path.GetFileName(f));
-                }
-            }
-            foreach (var d in preview.ExternalDiskFiles)
-                list.AppendLine("· " + d);
-            if (list.Length == 0) list.Append(vm.Name);
+                FontFamily = new System.Windows.Media.FontFamily("Consolas"),
+                FontSize = 12,
+            };
 
-            // 正文用原生控件：上方告警文字（自动换行）+ 下方等宽、可滚动的清单（路径长/文件多都不撑爆弹窗）。
+            static bool IsHighlightedImage(string path)
+            {
+                string extension = System.IO.Path.GetExtension(path);
+                return extension.Equals(".iso", StringComparison.OrdinalIgnoreCase)
+                    || extension.Equals(".vhd", StringComparison.OrdinalIgnoreCase)
+                    || extension.Equals(".vhdx", StringComparison.OrdinalIgnoreCase);
+            }
+
+            void AppendPreviewLine(string text, string? filePath = null)
+            {
+                var run = new System.Windows.Documents.Run(text);
+                if (!string.IsNullOrEmpty(filePath) && IsHighlightedImage(filePath))
+                    run.Foreground = new System.Windows.Media.SolidColorBrush(
+                        System.Windows.Media.Color.FromRgb(232, 71, 86));
+                listText.Inlines.Add(run);
+                listText.Inlines.Add(new System.Windows.Documents.LineBreak());
+            }
+            var purgeFiles = preview.ConfigFiles
+                .Concat(preview.DiskFiles)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (preview.DeletesConfigDirectory && !string.IsNullOrEmpty(preview.ConfigDirectory))
+            {
+                AppendPreviewLine("· " + preview.ConfigDirectory);
+            }
+            int shown = 0;
+            foreach (string file in purgeFiles)
+            {
+                if (shown++ >= 40)
+                {
+                    AppendPreviewLine($"· … (+{purgeFiles.Count - 40})");
+                    break;
+                }
+
+                bool nested = preview.DeletesConfigDirectory
+                              && !string.IsNullOrEmpty(preview.ConfigDirectory)
+                              && IsPathInside(file, preview.ConfigDirectory);
+                string displayPath = nested
+                    ? System.IO.Path.GetRelativePath(preview.ConfigDirectory!, file)
+                    : file;
+                AppendPreviewLine((nested ? "     · " : "· ") + displayPath, file);
+            }
+            if (listText.Inlines.Count == 0)
+                AppendPreviewLine(vm.Name);
+
+            static bool IsPathInside(string path, string root)
+            {
+                string fullPath = System.IO.Path.GetFullPath(path);
+                string fullRoot = System.IO.Path.GetFullPath(root)
+                    .TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
+                return fullPath.StartsWith(
+                    fullRoot + System.IO.Path.DirectorySeparatorChar,
+                    StringComparison.OrdinalIgnoreCase);
+            }
+
+            // 文件清单使用可滚动区域，避免长路径或大量文件扩大对话框。
             var body = new System.Windows.Controls.StackPanel();
             body.Children.Add(new System.Windows.Controls.TextBlock
             {
@@ -328,14 +375,10 @@ namespace ExHyperV.ViewModels
             body.Children.Add(new System.Windows.Controls.ScrollViewer
             {
                 MaxHeight = 220,
+                Padding = new System.Windows.Thickness(0, 0, 0, 8),
                 VerticalScrollBarVisibility = System.Windows.Controls.ScrollBarVisibility.Auto,
                 HorizontalScrollBarVisibility = System.Windows.Controls.ScrollBarVisibility.Auto,
-                Content = new System.Windows.Controls.TextBlock
-                {
-                    Text = list.ToString().TrimEnd(),
-                    FontFamily = new System.Windows.Media.FontFamily("Consolas"),
-                    FontSize = 12,
-                },
+                Content = listText,
             });
 
             var dialog = new Wpf.Ui.Controls.MessageBox
@@ -380,6 +423,7 @@ namespace ExHyperV.ViewModels
             HostDisks.Clear();
             if (value == null) { CurrentViewType = VmDetailViewType.Dashboard; return; }
             IsCreatingVm = false;
+            if (!IsExecutingVmImport) IsVmImportViewVisible = false;
 
             // 切 VM 时保留当前的无状态详情子页：重跑对应 GoTo 加载新 VM 的数据、停在同一子页(去 B 的对应详情页)；
             // 概览及其它一律回概览。进行中向导(AddGpu*/AddStorage)期间左侧列表已禁用，不会走到这里。
@@ -467,9 +511,17 @@ namespace ExHyperV.ViewModels
             // 判据(本地化无关):失败错误文本含设备名 "GPU Partition"(本地化消息里仍为英文),
             // 或含某个失效分区的实例 GUID。两者皆无 → 本次失败另有其因(如 0x8007000E 内存不足)→ 交回通用报错。
             string err = startError ?? string.Empty;
+            var explicitlyImplicated = stale
+                .Where(s => err.IndexOf(s.Instance, StringComparison.OrdinalIgnoreCase) >= 0)
+                .ToList();
             bool gpuImplicated = err.IndexOf("GPU Partition", StringComparison.OrdinalIgnoreCase) >= 0
-                || stale.Any(s => err.IndexOf(s.Instance, StringComparison.OrdinalIgnoreCase) >= 0);
+                || explicitlyImplicated.Count > 0;
             if (!gpuImplicated) return false;
+
+            // Worker 错误通常带有实际失败的 GPU-PV 实例 GUID。此时只修复
+            // 精确命中的实例，避免顺带删除与本次启动失败无关的其它旧分区。
+            if (explicitlyImplicated.Count > 0)
+                stale = explicitlyImplicated;
 
             // 区分两种失配:同一张卡仍在主机但路径变了(可重指,保住 GPU)vs 卡已不在(只能清除)
             bool allRebind = stale.All(s => !string.IsNullOrEmpty(s.RebindPath));
@@ -576,7 +628,6 @@ namespace ExHyperV.ViewModels
 
         public List<string> AvailableOsTypes => OsImages.SupportedTypes;
 
-        // 加载虚拟机列表
         [RelayCommand]
         private async Task LoadVmsAsync()
         {
@@ -684,20 +735,17 @@ namespace ExHyperV.ViewModels
         }
 
 
-        // ===== 后台监控循环与状态更新 =====
 
-        // 启动后台监控线程
         private void StartMonitoring()
         {
             if (_monitoringCts != null) return;
             _monitoringCts = new CancellationTokenSource();
             _ = Task.Run(() => MonitorCpuLoop(_monitoringCts.Token));
             _ = Task.Run(() => MonitorStateLoop(_monitoringCts.Token));
-            // 独立的缩略图任务，避免阻塞状态同步
+            // 缩略图刷新独立运行，避免阻塞状态同步。
             _ = Task.Run(() => MonitorThumbnailLoop(_monitoringCts.Token));
         }
 
-        // CPU 使用率监控循环
         private async Task MonitorCpuLoop(CancellationToken token)
         {
             try { _cpuService = new CpuMonitorService(); } catch { return; }
@@ -717,7 +765,6 @@ namespace ExHyperV.ViewModels
             {
                 try
                 {
-                    // 1. 获取后端最新原始数据
                     var updates = await _queryService.GetVmListAsync();
                     var memoryMap = await _queryService.GetVmRuntimeMemoryDataAsync();
 
@@ -727,7 +774,6 @@ namespace ExHyperV.ViewModels
                     Application.Current.Dispatcher.Invoke(() => {
                         bool needsResort = false;
 
-                        // --- A. 监测删除：移除本地列表中 已经不存在于后端 的 VM ---
                         var updateIds = updates.Select(u => u.Id).ToHashSet();
                         for (int i = VmList.Count - 1; i >= 0; i--)
                         {
@@ -739,7 +785,6 @@ namespace ExHyperV.ViewModels
                             }
                         }
 
-                        // --- B. 监测新建：添加后端存在但 本地列表没有 的 VM ---
                         var currentIds = VmList.Select(v => v.Id).ToHashSet();
                         foreach (var update in updates)
                         {
@@ -751,7 +796,6 @@ namespace ExHyperV.ViewModels
                             }
                         }
 
-                        // --- C. 更新属性：原有逻辑 ---
                         foreach (var update in updates)
                         {
                             // 使用 Id 匹配比 Name 更可靠，因为 VM 可能会被改名
@@ -786,7 +830,7 @@ namespace ExHyperV.ViewModels
                                 if (wasRunning != vm.IsRunning) needsResort = true;
 
                                 // PageVM-only side effect 1：运行时收集 IP。
-                                // 集成服务报的列表(含 IPv4+IPv6/多地址)最权威，绝不覆盖；嗅探/查询只补"没 IP 的空网卡"(如国产环境)。
+                                // 集成服务返回的地址优先；嗅探和查询仅补充没有地址的网卡。
                                 if (vm.IsRunning)
                                 {
                                     foreach (var adapter in vm.NetworkAdapters)
@@ -879,14 +923,12 @@ namespace ExHyperV.ViewModels
             catch { }
         }
 
-        // 处理 CPU 更新数据
         private void ProcessAndApplyCpuUpdates(List<VmCoreMetric> rawData) { var grouped = rawData.GroupBy(x => x.VmName); foreach (var group in grouped) { var vm = VmList.FirstOrDefault(v => v.Name == group.Key); if (vm == null) continue; vm.AverageUsage = vm.IsRunning ? group.Average(x => x.Usage) : 0; UpdateVmCores(vm, group.ToList()); } }
         private void UpdateVmCores(VmInstanceViewModel vm, List<VmCoreMetric> metrics) { var metricIds = metrics.Select(m => m.CoreId).ToHashSet(); vm.Cores.Where(c => !metricIds.Contains(c.CoreId)).ToList().ForEach(r => vm.Cores.Remove(r)); foreach (var metric in metrics) { var core = vm.Cores.FirstOrDefault(c => c.CoreId == metric.CoreId); if (core == null) { core = new VmCoreItem { CoreId = metric.CoreId }; int idx = 0; while (idx < vm.Cores.Count && vm.Cores[idx].CoreId < metric.CoreId) idx++; vm.Cores.Insert(idx, core); } core.Usage = metric.Usage; UpdateHistory(vm.Name, core); } vm.Columns = GridLayoutMath.CalculateOptimalColumns(vm.Cores.Count); vm.Rows = (vm.Cores.Count > 0) ? (int)Math.Ceiling((double)vm.Cores.Count / vm.Columns) : 1; }
         private void UpdateHistory(string vmName, VmCoreItem core) { string key = $"{vmName}_{core.CoreId}"; if (!_historyCache.TryGetValue(key, out var history)) { history = new LinkedList<double>(); for (int k = 0; k < MaxHistoryLength; k++) history.AddLast(0); _historyCache[key] = history; } history.AddLast(core.Usage); if (history.Count > MaxHistoryLength) history.RemoveFirst(); core.HistoryPoints = CalculatePoints(history); }
         private PointCollection CalculatePoints(LinkedList<double> history) { double w = 100.0, h = 100.0, step = w / (MaxHistoryLength - 1); var points = new PointCollection(MaxHistoryLength + 2) { new Point(0, h) }; int i = 0; foreach (var val in history) points.Add(new Point(i++ * step, h - (val * h / 100.0))); points.Add(new Point(w, h)); points.Freeze(); return points; }
 
 
-        // ===== UI 辅助方法 =====
 
         private string GetOptimisticText(string action) => action switch { "Start" => Properties.Resources.Status_Starting, "Restart" => Properties.Resources.Status_Restarting, "Stop" => Properties.Resources.Status_StoppingPresent, "TurnOff" => Properties.Resources.Status_StoppingPresent, "Save" => Properties.Resources.Status_Saving, "Suspend" => Properties.Resources.Status_Suspending, _ => Properties.Resources.Status_Processing };
 
@@ -918,7 +960,7 @@ namespace ExHyperV.ViewModels
                     Application.Current.Dispatcher.Invoke(() => sel.Thumbnail = null);
                 }
 
-                // 缩略图不需要太高的刷新率，1.5秒或2秒一次即可，避免占用过多WMI资源
+                // 降低缩略图刷新频率以减少 WMI 开销。
                 await Task.Delay(1500, token);
             }
         }

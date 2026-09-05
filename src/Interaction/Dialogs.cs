@@ -82,15 +82,26 @@ namespace ExHyperV.Interaction
             return result == ContentDialogResult.Primary;
         }
 
-        // WPF-UI 的 Danger 外观按钮不设前景、继承 ButtonForeground(随主题)→ 亮色主题下红底黑字。
-        // 弹窗加载后把可视树里 Danger 外观按钮前景强制刷白(红底恒可读)，对齐 XAML 里 Danger 按钮手写 Foreground="White"。
+        // WPF-UI 的弹窗按钮前景会随交互状态切换；危险确认框中的主按钮和取消按钮都固定使用白字。
         public static void ForceDangerButtonWhiteForeground(FrameworkElement dialog)
         {
+            string closeButtonText = dialog switch
+            {
+                Wpf.Ui.Controls.MessageBox messageBox => messageBox.CloseButtonText,
+                ContentDialog contentDialog => contentDialog.CloseButtonText,
+                _ => string.Empty
+            };
+
             dialog.Loaded += (_, _) =>
             {
                 foreach (var btn in FindVisualChildren<Wpf.Ui.Controls.Button>(dialog))
-                    if (btn.Appearance == ControlAppearance.Danger)
+                {
+                    bool isCloseButton = !string.IsNullOrEmpty(closeButtonText)
+                        && string.Equals(btn.Content?.ToString(), closeButtonText, StringComparison.Ordinal);
+
+                    if (btn.Appearance == ControlAppearance.Danger || isCloseButton)
                         btn.Foreground = System.Windows.Media.Brushes.White;
+                }
             };
         }
 
@@ -196,9 +207,7 @@ namespace ExHyperV.Interaction
             return result == ContentDialogResult.Primary;
         }
 
-        // ===== 文件系统选择器 =====
-        // 封装 Microsoft.Win32 的打开/保存/选目录对话框，VM 不再各自 new 一遍样板。
-        // 统一约定：返回选中的路径；用户取消一律返回 null（调用方据此决定是否更新绑定）。
+        // 文件对话框在用户取消时返回 null。
 
         /// <summary>打开文件选择框。title 传 null 用系统默认标题。</summary>
         public static string? PickOpenFile(string? title, string filter, string? initialDir = null)

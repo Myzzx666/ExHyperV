@@ -20,7 +20,7 @@ namespace ExHyperV.Services
 
         static UsbVmbusService()
         {
-            // High 足以保证 USB 转发低延迟；RealTime 会饿死系统输入/磁盘线程，有整机卡死风险，绝不用于用户态进程
+            // RealTime 可能阻塞系统输入和磁盘线程，因此用户态转发进程最高使用 High。
             try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.High; } catch { }
         }
 
@@ -256,8 +256,8 @@ namespace ExHyperV.Services
             catch { }
         }
 
-        // 宿主侧 USB 直通前置：usbipd-win 是否已安装。查服务注册表项（每个 Windows 服务在此都有键）+ 默认安装路径兜底；
-        // 不起进程、不依赖 PATH。仅检测宿主——虚拟机侧（usbip-win2 / USBProxy）由用户自理，不在此列。
+        // 主机侧 USB 直通前置：usbipd-win 是否已安装。查服务注册表项（每个 Windows 服务在此都有键）+ 默认安装路径兜底；
+        // 不起进程、不依赖 PATH。仅检测主机——虚拟机侧（usbip-win2 / USBProxy）由用户自理，不在此列。
         public static bool IsUsbipdInstalled()
         {
             try

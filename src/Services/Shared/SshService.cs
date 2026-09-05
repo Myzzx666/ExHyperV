@@ -54,7 +54,7 @@ namespace ExHyperV.Services
                     string escapedPassword = credentials.Password.Replace("'", "'\\''");
                     commandToExecute = $"echo '{escapedPassword}' | sudo -S -p '' bash -c '{escapedCommand}'";
                 }
-                var sshCommand = client.CreateCommand(commandToExecute);
+                using var sshCommand = client.CreateCommand(commandToExecute);
                 sshCommand.CommandTimeout = commandTimeout ?? TimeSpan.FromMinutes(30);
 
                 var asyncResult = sshCommand.BeginExecute();
@@ -98,7 +98,7 @@ namespace ExHyperV.Services
                     commandToExecute = $"echo '{escapedPassword}' | sudo -S -p '' bash -c '{escapedCommand}'";
                 }
 
-                var sshCommand = client.CreateCommand(commandToExecute);
+                using var sshCommand = client.CreateCommand(commandToExecute);
                 sshCommand.CommandTimeout = commandTimeout ?? TimeSpan.FromMinutes(30);
 
                 var asyncResult = sshCommand.BeginExecute();
@@ -174,22 +174,10 @@ namespace ExHyperV.Services
         {
             foreach (var file in localDirectory.GetFiles())
             {
-                if (file.Extension.Equals(".log", StringComparison.OrdinalIgnoreCase))
+                using (var fileStream = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
                 {
-                    continue;
-                }
-                try
-                {
-                    using (var fileStream = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-                    {
-                        var remoteFilePath = $"{remoteDirectory}/{file.Name}";
-                        sftp.UploadFile(fileStream, remoteFilePath);
-                    }
-                }
-                catch (IOException)
-                {
-
-                    continue;
+                    var remoteFilePath = $"{remoteDirectory}/{file.Name}";
+                    sftp.UploadFile(fileStream, remoteFilePath);
                 }
             }
             foreach (var subDir in localDirectory.GetDirectories())

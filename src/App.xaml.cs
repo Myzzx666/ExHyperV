@@ -33,6 +33,14 @@ public partial class App
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        // 正常模式下为窗口内页面统一启用平滑滚轮；轻量模式仍遵循“关闭动画”的约定。
+        if (!PerformanceMode)
+            SmoothScroll.Initialize();
+
+        // 旧版本曾把 AzureFeatureSet 暴露为持久化主机选项，临时操作异常中断时也可能留下该值。
+        // 此暂存开关由 ExHyperV 管理，因此必须在任何 Hyper-V 操作开始前恢复为关闭状态。
+        ExHyperV.Services.HostAzureFeatureSetService.EnsureDisabledAtRest();
+
         base.OnStartup(e);
 
         string targetLanguage;
@@ -58,8 +66,9 @@ public partial class App
     }
     protected override void OnExit(ExitEventArgs e)
     {
+        ExHyperV.Services.HostAzureFeatureSetService.EnsureDisabledAtRest();
         // 主动停掉 ARP 嗅探的 ETW 会话：赶在 CLR 硬终止后台线程之前、在受控时机清理，
-        // 否则 pump 线程卡在 native ProcessTrace 会吊死整个进程退出。Service 内 ProcessExit 注册留作兜底。
+        // 否则 ProcessTrace 线程会阻止进程退出；服务层的 ProcessExit 处理仅作后备。
         ExHyperV.Services.ArpSnoopService.Instance.Dispose();
         base.OnExit(e);
     }
@@ -104,7 +113,7 @@ public partial class App
 
     private void WriteLanguageToConfig(string cultureCode)
     {
-        // 配置写不了(首次运行遇只读目录/权限不足/文件损坏)绝不能让启动崩溃——静默跳过持久化，语言已在内存生效。
+        // 配置不可写时跳过持久化，语言设置仍在当前进程内生效。
         try
         {
             var configDoc = File.Exists(ConfigFilePath)

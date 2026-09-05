@@ -10,17 +10,13 @@ namespace ExHyperV.ViewModels
 {
     public partial class VirtualMachinesPageViewModel
     {
-        // ===== 视图模型属性 - 网络设置 =====
         [ObservableProperty] private ObservableCollection<string> _availableSwitchNames = new();
 
 
-        // ===== 网络设置模块 =====
 
 
 
-        // ===== 网络模式映射选项 (用于翻译) =====
 
-        // 1. VLAN 主模式映射
         public List<object> VlanModeOptions { get; } = new()
 {
     new { Value = VlanOperationMode.Access, Name = Properties.Resources.Net_Mode_Access },
@@ -28,7 +24,6 @@ namespace ExHyperV.ViewModels
     new { Value = VlanOperationMode.Private, Name = Properties.Resources.Net_Mode_Private }
 };
 
-        // 2. Private VLAN 类型 (角色) 映射
         public List<object> PvlanModeOptions { get; } = new()
 {
     new { Value = PvlanMode.Isolated, Name = Properties.Resources.Net_Pvlan_Isolated },
@@ -36,7 +31,6 @@ namespace ExHyperV.ViewModels
     new { Value = PvlanMode.Promiscuous, Name = Properties.Resources.Net_Pvlan_Promiscuous }
 };
 
-        // 3. 端口镜像模式映射
         public List<object> PortMirroringOptions { get; } = new()
 {
     new { Value = PortMonitorMode.None, Name = Properties.Resources.Common_Disabled },
@@ -44,7 +38,6 @@ namespace ExHyperV.ViewModels
     new { Value = PortMonitorMode.Destination, Name = Properties.Resources.Net_Mirror_Dest }
 };
 
-        // 导航至网络设置
         [RelayCommand]
         private async Task GoToNetworkSettingsAsync()
         {
@@ -93,25 +86,22 @@ namespace ExHyperV.ViewModels
             }
         }
 
-        // 智能同步网卡列表，避免 UI 闪烁
+        // 原位合并网卡列表以保持现有绑定。
         private void SyncNetworkAdaptersInternal(ObservableCollection<VmNetworkAdapter> currentList, List<VmNetworkAdapter> newList)
         {
             if (newList == null) return;
 
-            // 1. 移除已经不存在的网卡
             var toRemove = currentList.Where(c => !newList.Any(n => n.Id == c.Id)).ToList();
             foreach (var item in toRemove)
             {
                 currentList.Remove(item);
             }
 
-            // 2. 更新现有的 或 添加新的
             foreach (var newItem in newList)
             {
                 var existingItem = currentList.FirstOrDefault(c => c.Id == newItem.Id);
                 if (existingItem != null)
                 {
-                    // === 存在则更新属性 ===
                     existingItem.Name = newItem.Name;
                     existingItem.IsConnected = newItem.IsConnected;
                     existingItem.SwitchName = newItem.SwitchName;
@@ -154,7 +144,7 @@ namespace ExHyperV.ViewModels
             }
         }
 
-        // 网卡操作失败后从后端重新拉取真实状态覆盖 UI（回滚"撒谎"的开关；复用智能同步避免闪烁）
+        // 网卡操作失败后重新读取后端状态，使界面回到实际值。
         private async Task RevertAdaptersFromBackendAsync()
         {
             if (SelectedVm == null) return;
@@ -166,7 +156,6 @@ namespace ExHyperV.ViewModels
             catch { /* 回滚是尽力而为：拉取失败则保持现状，离开网络页时会自然重对账 */ }
         }
 
-        // 添加新的网络适配器
         [RelayCommand]
         private async Task AddNetworkAdapterAsync()
         {
@@ -196,7 +185,6 @@ namespace ExHyperV.ViewModels
             }
         }
 
-        // 移除网络适配器
         [RelayCommand]
         private async Task RemoveNetworkAdapterAsync(string adapterId)
         {
@@ -227,7 +215,6 @@ namespace ExHyperV.ViewModels
             }
         }
 
-        // 更新网卡连接状态
         [RelayCommand]
         private async Task UpdateAdapterConnectionAsync(VmNetworkAdapter adapter)
         {
@@ -235,6 +222,16 @@ namespace ExHyperV.ViewModels
             // 静默改或断开网卡连接(运行态可热改、不报错，更隐蔽)。仅在仍处于网络页时执行。
             if (CurrentViewType != VmDetailViewType.NetworkSettings) return;
             if (SelectedVm == null || adapter == null) return;
+
+            // 未创建任何虚拟交换机时，网卡只有 setting、没有可创建的端口分配对象。
+            // 开启操作在这里直接回滚并给出明确提示，避免落到 WMI 后显示误导性的“找不到分配对象”。
+            if (adapter.IsConnected && AvailableSwitchNames.Count == 0)
+            {
+                adapter.IsConnected = false;
+                ShowTip(Properties.Resources.Msg_Net_CreateSwitchFirst);
+                return;
+            }
+
             IsLoadingSettings = true;
             try
             {
@@ -273,7 +270,6 @@ namespace ExHyperV.ViewModels
             }
         }
 
-        // 应用 VLAN 设置
         [RelayCommand]
         private async Task ApplyVlanSettingsAsync(VmNetworkAdapter adapter)
         {
@@ -291,7 +287,6 @@ namespace ExHyperV.ViewModels
             }
         }
 
-        // 应用 QoS 设置
         [RelayCommand]
         private async Task ApplyQosSettingsAsync(VmNetworkAdapter adapter)
         {
@@ -309,7 +304,6 @@ namespace ExHyperV.ViewModels
             }
         }
 
-        // 应用安全与监控设置
         [RelayCommand]
         private async Task ApplySecuritySettingsAsync(VmNetworkAdapter adapter)
         {
@@ -339,7 +333,6 @@ namespace ExHyperV.ViewModels
             }
         }
 
-        // 切换硬件加速设置
         [RelayCommand]
         private async Task ToggleOffloadSettingAsync(VmNetworkAdapter adapter)
         {
@@ -353,7 +346,6 @@ namespace ExHyperV.ViewModels
             }
         }
 
-        // 切换安全防护设置
         [RelayCommand]
         private async Task ToggleSecuritySettingAsync(VmNetworkAdapter adapter)
         {

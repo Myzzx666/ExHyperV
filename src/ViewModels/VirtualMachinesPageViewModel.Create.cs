@@ -14,28 +14,29 @@ namespace ExHyperV.ViewModels
 {
     public partial class VirtualMachinesPageViewModel
     {
-        // ===== 视图模型属性 - 创建虚拟机表单 =====
 
         // 控制右侧界面切换
         [ObservableProperty] private bool _isCreatingVm = false;
         [ObservableProperty] private string _creatingStatusText = string.Empty;
+        [ObservableProperty] private bool _isLoadingCreateOptions = false;
 
-        // 当名称变化时，自动更新磁盘路径
         partial void OnNewVmNameChanged(string value)
         {
             UpdateDiskPath();
         }
 
-        // 当基础路径变化时，自动更新磁盘路径
+        // 用户直接键入配置目录时，不允许稍后完成的主机探测覆盖它。
+        private bool _isUpdatingConfigPath;
+        private bool _isConfigPathManual;
         partial void OnNewVmStoragePathChanged(string value)
         {
-            UpdateDiskPath();
+            if (!_isUpdatingConfigPath)
+                _isConfigPathManual = true;
         }
 
 
         // 重命名
 
-        // 1. 触发重命名模式
         [RelayCommand]
         private void RenameVm(VmInstanceViewModel vm)
         {
@@ -43,7 +44,6 @@ namespace ExHyperV.ViewModels
             vm.StartEditing();
         }
 
-        // 2. 取消重命名
         [RelayCommand]
         private void CancelRename(VmInstanceViewModel vm)
         {
@@ -93,7 +93,6 @@ namespace ExHyperV.ViewModels
         }
 
 
-        // --- 1. 常规设置 ---
         [ObservableProperty] private string _newVmName = "NewVM";
         [ObservableProperty] private string _newVmStoragePath = string.Empty;
 
@@ -102,17 +101,12 @@ namespace ExHyperV.ViewModels
         [NotifyPropertyChangedFor(nameof(IsSingleCreate))]
         private string _newVmQuantity = "1";
 
-        // 单台创建（数量≤1）。绑定给"现有磁盘"选项的 IsEnabled：批量不支持现有磁盘（多台共用一块盘会互踩）。
+        // 批量创建不能复用同一个现有磁盘。
         public bool IsSingleCreate => !(int.TryParse(NewVmQuantity, out var q) && q > 1);
 
-        partial void OnNewVmQuantityChanged(string value)
-        {
-            if (!IsSingleCreate && NewVmDiskMode == 1) NewVmDiskMode = 0;
-        }
         [ObservableProperty] private ObservableCollection<string> _supportedVersions = new() { "12.0", "11.0", "10.0", "9.0", "8.0" };
         [ObservableProperty] private string _selectedVersion = "8.0";
 
-        // --- 2. 计算资源 ---
         [ObservableProperty] private string _newVmProcessorCount = "4"; // ComboBox IsEditable="True" 绑定 string
         [ObservableProperty] private string _newVmMemoryMb = "4096";    // ComboBox IsEditable="True" 绑定 string
         [ObservableProperty] private bool _newVmDynamicMemory = false;
@@ -120,9 +114,9 @@ namespace ExHyperV.ViewModels
         // 安全特性 (仅第 2 代)
         [ObservableProperty] private bool _newVmEnableSecureBoot = true;
         [ObservableProperty] private bool _newVmEnableTpm = true;
-        [ObservableProperty] private string _newVmIsolationType = "Disabled"; // Disabled, TrustedLaunch, VBS, SNP, TDX
+        [ObservableProperty] private string _newVmIsolationType = "Disabled"; // Disabled, TrustedLaunch, VBS, SNP, TDX, RME, OpenHCL
+        [ObservableProperty] private string _newVmOpenHclIgvmPath = string.Empty;
 
-        // --- 3. 存储资源 ---
         [ObservableProperty] private int _newVmDiskMode = 0; // 0:新建磁盘, 1:现有磁盘, 2:稍后附加
         [ObservableProperty] private string _newVmDiskSizeGb = "128";
         [ObservableProperty] private string _newVmNewDiskPath = string.Empty;      // 模式0使用
@@ -131,59 +125,89 @@ namespace ExHyperV.ViewModels
         // 安装介质 (ISO)
         [ObservableProperty] private string _newVmIsoPath = string.Empty;
 
-        // --- 4. 网络与全局动作 ---
         [ObservableProperty] private string _newVmSelectedSwitch = string.Empty;
         [ObservableProperty] private bool _startVmAfterCreation = true;
 
-        // 1. 探测结果：系统是否支持
         [ObservableProperty]
         [NotifyPropertyChangedFor(nameof(CanEnableIsolation))] // 当此值改变，通知 UI 刷新 CanEnableIsolation
         private bool _isIsolationSupported = false;
 
-        // 2. 找到你原有的 NewVmGeneration 属性，添加通知
         [ObservableProperty]
         [NotifyPropertyChangedFor(nameof(CanEnableIsolation))] // 当代际改变，通知 UI 刷新 CanEnableIsolation
         private int _newVmGeneration = 2;
 
-        // 3. 这是一个只读的计算属性，用于 UI 绑定
         public bool CanEnableIsolation => IsIsolationSupported && NewVmGeneration == 2;
 
         // ARM64 的 Hyper-V 不提供 IDE 控制器，无法承载第 1 代虚拟机（建机会卡在加盘步 Storage_Error_ControllerNotFound），
         // 据此禁用第 1 代选项。OS 架构运行期不变，故为只读计算属性、无需变更通知。
         public bool CanUseGen1 => RuntimeInformation.OSArchitecture != Architecture.Arm64;
 
-        // 存储探测到的类型列表
         [ObservableProperty]
         private ObservableCollection<string> _supportedIsolationTypes = new() { "Disabled" };
-        private bool _isDiskPathManual = false; // 用户是否手动选过磁盘路径（手动后不再自动联动）；仅本模块使用（原误置于核心 .cs）
+        private bool _isDiskPathManual;
+        private bool _isUpdatingDiskPath;
+        private string _defaultVhdPath = @"C:\ProgramData\Microsoft\Windows\Virtual Hard Disks";
+
+        partial void OnNewVmNewDiskPathChanged(string value)
+        {
+            if (!_isUpdatingDiskPath)
+                _isDiskPathManual = true;
+        }
+
+        partial void OnNewVmGenerationChanged(int value)
+        {
+            if (value == 2) return;
+
+            NewVmIsolationType = "Disabled";
+            NewVmOpenHclIgvmPath = string.Empty;
+        }
 
 
 
-        // ===== 创建虚拟机模块 =====
 
-        // 1. 点击左侧 "+" 按钮：进入创建模式
         private void UpdateDiskPath()
         {
             if (string.IsNullOrWhiteSpace(NewVmName) || _isDiskPathManual) return; // 如果手动选过，就不再自动更新
 
-            string root = string.IsNullOrWhiteSpace(NewVmStoragePath) ? @"C:\ProgramData\Microsoft\Windows\Hyper-V" : NewVmStoragePath;
+            string root = string.IsNullOrWhiteSpace(_defaultVhdPath)
+                ? NewVmStoragePath
+                : _defaultVhdPath;
             try
             {
+                _isUpdatingDiskPath = true;
                 NewVmNewDiskPath = Path.Combine(root, NewVmName);   // 只存文件夹，vhdx 文件名由服务按最终 VM 名派生
             }
             catch { }
+            finally { _isUpdatingDiskPath = false; }
+        }
+
+        private void SetDetectedConfigPath(string path)
+        {
+            if (_isConfigPathManual) return;
+            try
+            {
+                _isUpdatingConfigPath = true;
+                NewVmStoragePath = path;
+            }
+            finally { _isUpdatingConfigPath = false; }
         }
 
         [RelayCommand]
         private async Task CreateVmAsync()
         {
-            // --- 1. UI 状态与标志位重置 ---
-            IsLoadingSettings = true;
+            if (IsExecutingVmImport || IsPreparingVmImport) return;
+            await DisposeVmImportSessionAsync();
+            VmImportPreview = null;
+            VmImportStep = 0;
+            IsVmImportCompleted = false;
+            IsVmImportViewVisible = false;
             IsCreatingVm = true;
+            IsLoadingCreateOptions = true;
             SelectedVm = null;
-            _isDiskPathManual = false;     // 重置用户手动选择磁盘路径的标记
+            _isDiskPathManual = false;
+            _isConfigPathManual = false;
+            _defaultVhdPath = @"C:\ProgramData\Microsoft\Windows\Virtual Hard Disks";
 
-            // --- 2. 基础配置默认值初始化 ---
             NewVmGeneration = 2;
             NewVmMemoryMb = "4096";
             int hostCores = Environment.ProcessorCount;
@@ -195,59 +219,60 @@ namespace ExHyperV.ViewModels
             NewVmDynamicMemory = false;
             NewVmEnableSecureBoot = true;
             NewVmEnableTpm = true;
+            NewVmOpenHclIgvmPath = string.Empty;
             StartVmAfterCreation = true;
             NewVmIsoPath = string.Empty;
             NewVmExistingDiskPath = string.Empty;
 
+            // 先用可靠的回退值立即呈现表单；主机真实值随后在后台刷新。
+            SetDetectedConfigPath(@"C:\ProgramData\Microsoft\Windows\Hyper-V");
+            NewVmName = GetNextAvailableName("NewVM");
+            UpdateDiskPath();
+
             try
             {
-                // 3. 动态探测宿主机默认路径（不硬编码）
-                // 调用 Service 通过 (Get-VMHost).VirtualMachinePath 获取真实路径
-                var hostPaths = await VmCreateService.GetHostDefaultPathsAsync();
+                // 四组主机信息彼此独立，并行探测，避免每次进入页面串行等待多轮 WMI。
+                var hostPathsTask = VmCreateService.GetHostDefaultPathsAsync();
+                var versionsTask = VmCreateService.GetSupportedVersionsAsync();
+                var isolationTask = VmCreateService.GetIsolationSupportAsync();
+                var switchesTask = VmNetworkService.GetAvailableSwitchesAsync();
 
-                // 设置 UI 显示的根路径 (例如 C:\ProgramData\Microsoft\Windows\Hyper-V)
-                NewVmStoragePath = hostPaths.DefaultVmPath;
+                await Task.WhenAll(hostPathsTask, versionsTask, isolationTask, switchesTask);
 
-                // --- 4. 初始化名称并触发路径联动 ---
-                // 获取当前系统中不冲突的名称 (如 NewVM, NewVM (2))
-                NewVmName = GetNextAvailableName("NewVM");
+                var hostPaths = await hostPathsTask;
+                var allVersions = await versionsTask;
+                var (supported, types) = await isolationTask;
+                var switches = await switchesTask;
 
-                // 执行路径联动逻辑，确保 NewVmNewDiskPath 此时已经指向：
-                // [默认路径]\[NewVM]\[NewVM].vhdx
+                // 配置文件与虚拟硬盘分别采用各自的主机默认位置。
+                SetDetectedConfigPath(hostPaths.DefaultVmPath);
+                _defaultVhdPath = string.IsNullOrWhiteSpace(hostPaths.DefaultVhdPath)
+                    ? hostPaths.DefaultVmPath
+                    : hostPaths.DefaultVhdPath;
+
                 UpdateDiskPath();
 
-                // --- 5. 探测系统支持的配置版本 ---
-                var allVersions = await VmCreateService.GetSupportedVersionsAsync();
                 SupportedVersions = new ObservableCollection<string>(allVersions);
 
                 // 在已降序的列表里取第一个小于 200 的稳定版本作默认值
                 var defaultStable = allVersions.FirstOrDefault(v =>
                     double.TryParse(v, out double verNum) && verNum < 200);
 
-                // 如果找到稳定版则选中，否则选列表第一个
                 SelectedVersion = defaultStable ?? SupportedVersions.FirstOrDefault();
 
-                // --- 6. 探测机密计算 (Isolation) 支持情况 ---
-                var (supported, types) = await VmCreateService.GetIsolationSupportAsync();
                 IsIsolationSupported = supported;
                 SupportedIsolationTypes = new ObservableCollection<string>(types);
 
                 // 初始状态默认为 Disabled
                 NewVmIsolationType = "Disabled";
 
-                // --- 7. 加载虚拟交换机列表 ---
-                var switches = await VmNetworkService.GetAvailableSwitchesAsync();
-
-                // 创建一个临时的列表，第一项放“未连接”
                 string noneText = Properties.Resources.Common_None; // “未连接”的文本
                 var switchList = new List<string> { noneText };
                 if (switches != null) switchList.AddRange(switches);
 
                 AvailableSwitchNames = new ObservableCollection<string>(switchList);
 
-                // --- 改进后的自动选择逻辑 ---
 
-                // 1. 尝试寻找包含 "Default" 的交换机
                 var defaultSwitch = AvailableSwitchNames.FirstOrDefault(s =>
                     s.Contains("Default", StringComparison.OrdinalIgnoreCase) ||
                     s.Contains(Properties.Resources.VmPage_Default, StringComparison.OrdinalIgnoreCase));
@@ -258,17 +283,14 @@ namespace ExHyperV.ViewModels
                 }
                 else
                 {
-                    // 2. 如果没找到 Default，尝试寻找第一个“非未连接”的真实交换机
                     var firstRealSwitch = AvailableSwitchNames.FirstOrDefault(s => s != noneText);
 
-                    // 3. 如果找到了真实交换机就选它，否则（即列表里只有“未连接”）才选“未连接”
                     NewVmSelectedSwitch = firstRealSwitch ?? noneText;
                 }
 
             }
             catch (Exception ex)
             {
-                // 探测失败（如宿主没装 Hyper-V 网络组件）：保证至少有“未连接”可选，并提示用户部分选项可能不准确
                 AvailableSwitchNames = new ObservableCollection<string> { Properties.Resources.Common_None };
                 NewVmSelectedSwitch = AvailableSwitchNames[0];
                 ShowError($"{Properties.Resources.VmPage_CreateOptionsLoadFail}：{FriendlyError.CleanLines(ex.Message)}");
@@ -277,12 +299,9 @@ namespace ExHyperV.ViewModels
 
             finally
             {
-                // 延迟一小会儿关闭加载状态，确保 UI 绑定完成
-                await Task.Delay(100);
-                IsLoadingSettings = false;
+                IsLoadingCreateOptions = false;
             }
         }
-        // 2. 点击 Properties.Resources.Button_Cancel 按钮：退出创建模式
         [RelayCommand]
         private void CancelCreate()
         {
@@ -294,7 +313,6 @@ namespace ExHyperV.ViewModels
             }
         }
 
-        // --- 浏览文件系统相关命令 ---
 
         [RelayCommand]
         private void BrowseNewVmPath()
@@ -332,16 +350,24 @@ namespace ExHyperV.ViewModels
         }
 
         [RelayCommand]
+        private void BrowseOpenHclIgvm()
+        {
+            var picked = Dialogs.PickOpenFile(
+                Properties.Resources.VmPage_SelectOpenHclIgvm,
+                Properties.Resources.VmPage_OpenHclIgvmFilter,
+                GetDir(NewVmOpenHclIgvmPath));
+            if (picked != null) NewVmOpenHclIgvmPath = picked;
+        }
+
+        [RelayCommand]
         private async Task ConfirmCreateAsync()
         {
-            // --- 1. 基础验证：名称 ---
             if (string.IsNullOrWhiteSpace(NewVmName))
             {
                 ShowTip(Properties.Resources.VmPage_NameEmpty);
                 return;
             }
 
-            // --- 2. 磁盘模式深度验证 ---
             if (NewVmDiskMode == 0) // 新建磁盘
             {
                 if (string.IsNullOrWhiteSpace(NewVmNewDiskPath))
@@ -365,14 +391,29 @@ namespace ExHyperV.ViewModels
                 }
             }
 
-            // --- 4. ISO 镜像验证 (如果有输入) ---
             if (!string.IsNullOrWhiteSpace(NewVmIsoPath) && !File.Exists(NewVmIsoPath))
             {
                 ShowTip(Properties.Resources.VmPage_IsoNotFound);
                 return;
             }
 
-            // --- 5. 计算资源数值校验（IsEditable 下拉可输入任意串，挡掉非法/0/负数，避免静默回退默认值或建机失败）---
+            if (NewVmIsolationType == "OpenHCL")
+            {
+                if (string.IsNullOrWhiteSpace(NewVmOpenHclIgvmPath) ||
+                    !File.Exists(NewVmOpenHclIgvmPath))
+                {
+                    ShowTip(Properties.Resources.VmPage_OpenHclIgvmRequired);
+                    return;
+                }
+
+                if (!Version.TryParse(SelectedVersion, out var openHclVersion) ||
+                    openHclVersion < new Version(12, 0))
+                {
+                    ShowTip(Properties.Resources.VmPage_OpenHclRequiresV12);
+                    return;
+                }
+            }
+
             if (!int.TryParse(NewVmProcessorCount, out var cpuCount) || cpuCount < 1)
             {
                 ShowTip(Properties.Resources.VmPage_InvalidCpuCount);
@@ -389,19 +430,12 @@ namespace ExHyperV.ViewModels
                 return;
             }
 
-            // --- 数量校验 ---
             int quantity = int.TryParse(NewVmQuantity, out var qv) && qv >= 1 ? qv : 0;
             if (quantity < 1)
             {
                 ShowTip(Properties.Resources.VmPage_InvalidQuantity);
                 return;
             }
-            if (quantity > 1 && NewVmDiskMode != 0)
-            {
-                ShowTip(Properties.Resources.VmPage_BatchNewDiskOnly);
-                return;
-            }
-
             // 组装参数（单台/批量共用；数值已校验，直接用解析结果）
             VmCreationParams Build(string name) => new VmCreationParams
             {
@@ -415,10 +449,12 @@ namespace ExHyperV.ViewModels
                 EnableSecureBoot = NewVmEnableSecureBoot,
                 EnableTpm = NewVmEnableTpm,
                 IsolationType = NewVmIsolationType,
+                OpenHclIgvmPath = NewVmOpenHclIgvmPath,
                 DiskMode = NewVmDiskMode,
                 DiskSizeGb = long.TryParse(NewVmDiskSizeGb, out var ds) ? ds : 128,
                 VhdPath = NewVmDiskMode == 0 ? NewVmNewDiskPath : NewVmExistingDiskPath,
-                IsDiskPathManual = _isDiskPathManual,
+                CreateDifferencingDisk = quantity > 1 && NewVmDiskMode == 1,
+                DifferencingDiskRoot = _defaultVhdPath,
                 IsoPath = NewVmIsoPath,
                 SwitchName = NewVmSelectedSwitch,
                 StartAfterCreation = StartVmAfterCreation
@@ -489,7 +525,6 @@ namespace ExHyperV.ViewModels
                 CreatingStatusText = string.Empty;
             }
         }
-        // --- 辅助私有方法 ---
 
         private string GetNextAvailableName(string baseName)
         {

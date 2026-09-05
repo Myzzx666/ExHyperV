@@ -8,7 +8,6 @@ using System.Net.Http;
 
 namespace ExHyperV.Services
 {
-
     internal class GitHubRelease
     {
         public string tag_name { get; set; } = string.Empty;
@@ -192,7 +191,6 @@ namespace ExHyperV.Services
             catch { }
         }
 
-        // ===== 性能模式 =====
         // 关闭动画、减少内存占用（行为接线见后续；此处仅持久化开关）。存 config.xml 的 <PerformanceMode>。
         public static bool GetPerformanceMode()
         {
@@ -227,7 +225,6 @@ namespace ExHyperV.Services
             catch { }
         }
 
-        // ===== 控制台默认缩放档 =====
         // 保存用户上次手动选择的缩放（如 "150%" 或本地化"适应窗口"）；下次打开控制台优先用它。
 
         public static string? GetDefaultZoom()
@@ -262,7 +259,6 @@ namespace ExHyperV.Services
             catch { }
         }
 
-        // ===== 控制台默认连接模式 =====
         // 保存用户选择的连接模式；增强会话是否可用仍以虚拟机状态为准。
 
         public static string? GetDefaultConnectionMode()
@@ -297,7 +293,6 @@ namespace ExHyperV.Services
             catch { }
         }
 
-        // ===== 控制台增强会话分辨率 =====
         // 保存增强会话最后使用的分辨率（"WxH"）。
 
         public static (int Width, int Height)? GetDefaultConsoleResolution()
@@ -306,6 +301,11 @@ namespace ExHyperV.Services
             try
             {
                 XDocument configDoc = XDocument.Load(ConfigFilePath);
+                // 旧版本会在关闭控制台时把登录界面的 1366x768 当成用户偏好保存。
+                // 只有带显式标记的新值才可信；未标记的历史值交给新的 1920x1080 默认值迁移。
+                if (!bool.TryParse(configDoc.Root?.Element("DefaultConsoleResolutionExplicit")?.Value, out bool explicitValue)
+                    || !explicitValue)
+                    return null;
                 var v = configDoc.Root?.Element("DefaultConsoleResolution")?.Value;
                 if (string.IsNullOrEmpty(v)) return null;
                 var parts = v.Split('x');
@@ -329,18 +329,22 @@ namespace ExHyperV.Services
                     var el = configDoc.Root?.Element("DefaultConsoleResolution");
                     if (el != null) el.Value = val;
                     else configDoc.Root?.Add(new XElement("DefaultConsoleResolution", val));
+                    var explicitEl = configDoc.Root?.Element("DefaultConsoleResolutionExplicit");
+                    if (explicitEl != null) explicitEl.Value = bool.TrueString;
+                    else configDoc.Root?.Add(new XElement("DefaultConsoleResolutionExplicit", bool.TrueString));
                 }
                 else
                 {
-                    configDoc = new XDocument(new XElement("Config", new XElement("DefaultConsoleResolution", val)));
+                    configDoc = new XDocument(new XElement("Config",
+                        new XElement("DefaultConsoleResolution", val),
+                        new XElement("DefaultConsoleResolutionExplicit", bool.TrueString)));
                 }
                 configDoc.Save(ConfigFilePath);
             }
             catch { }
         }
 
-        // ===== 宿主 MMIO 上限缓存（MB） =====
-        // 首次 boot-probe 测得的宿主物理地址上限，持久化后不再重探（只认第一次测得的结果）。
+        // 首次 boot-probe 测得的主机物理地址上限，持久化后不再重探（只认第一次测得的结果）。
 
         public static ulong? GetMmioCeilingMb()
         {

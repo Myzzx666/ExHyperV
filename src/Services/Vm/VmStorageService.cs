@@ -8,10 +8,6 @@ namespace ExHyperV.Services
 {
     public static class VmStorageService
     {
-        // ============================================================
-        // 数据查询
-        // ============================================================
-
         public static async Task LoadVmStorageItemsAsync(VmInstance vm)
         {
             if (vm == null) return;
@@ -205,7 +201,7 @@ namespace ExHyperV.Services
                                     {
                                         string devId = devMatch.Groups[1].Value.Replace("\\\\", "\\");
                                         // hvDiskMap 来自 Msvm_DiskDrive(只含脱机盘)。查得到=盘仍脱机、直通有效;
-                                        // 查不到=盘已被手动联机、从可直通池消失 → 直通【悬空失效】(Hyper-V 显示"找不到"、VM 开机失败)。
+                                        // 已分配磁盘从直通池消失时，该直通配置已经失效。
                                         // 悬空时仍从 DeviceID 末尾(…\N)解析盘号(挂载时记录、不随联机变)，用于告诉用户是哪块盘失效——
                                         // 不能只靠 TryGetValue 的 out：查不到会把 dNum 置 0(默认值)，错映射到磁盘 0(常为系统盘)。
                                         if (!hvDiskMap.TryGetValue(devId, out dNum))
@@ -224,7 +220,7 @@ namespace ExHyperV.Services
                                     }
 
                                     // 悬空且解析不出盘号(NODRIVE)时 dNum=-1，显式落到 DiskNumber：
-                                    // UI 走通用文案，移除时也不会把默认值 0 误当宿主磁盘 0 去联机。
+                                    // UI 走通用文案，移除时也不会把默认值 0 误当主机磁盘 0 去联机。
                                     driveItem.DiskNumber = dNum;
                                     if (dNum != -1)
                                     {
@@ -315,9 +311,7 @@ namespace ExHyperV.Services
             return (hvMap, osMap);
         }
 
-        // ============================================================
         // 压缩虚拟磁盘
-        // ============================================================
 
         public static async Task<ApiResponse> CompactDiskAsync(string vhdPath)
         {
@@ -332,13 +326,9 @@ namespace ExHyperV.Services
                 WmiScope.HyperV);
         }
 
-        // ============================================================
         // 主机物理磁盘列表
-        // ============================================================
 
-        // ============================================================
         // 刷新虚拟磁盘文件大小
-        // ============================================================
 
         public static async Task RefreshVirtualDiskSizesAsync(VmInstance vm)
         {
@@ -374,9 +364,7 @@ namespace ExHyperV.Services
             });
         }
 
-        // ============================================================
         // 设备增删改操作
-        // ============================================================
 
         public static async Task<(bool Success, string Message, string ActualType, int ActualNumber, int ActualLocation)>
             AddDriveAsync(
@@ -432,7 +420,7 @@ namespace ExHyperV.Services
                     return (false, msg, controllerType, controllerNumber, location);
                 }
 
-                // 运行中 IDE 不能加任何设备(含光驱,IDE 无热插拔);UI 已前置拦,这里作服务层兜底
+                // IDE 不支持热添加设备，服务层也需要校验运行状态。
                 if (controllerType == "IDE" && isRunning)
                     return (false, driveType == "DvdDrive" ? Properties.Resources.Error_Storage_Gen1Dvd : Properties.Resources.Error_Storage_IdeHotAdd, controllerType, controllerNumber, location);
 
@@ -688,7 +676,7 @@ namespace ExHyperV.Services
 
                 slotCreated = true;
 
-                // 物理光驱直通也走 SASD(HostResource = 宿主光驱 PNPDeviceID)，与挂 ISO 同路径；物理硬盘的 HostResource 在 slot 上、不经此处。
+                // 物理光驱直通也走 SASD(HostResource = 主机光驱 PNPDeviceID)，与挂 ISO 同路径；物理硬盘的 HostResource 在 slot 上、不经此处。
                 bool isPhysicalOptical = isPhysical && driveType == "DvdDrive";
                 bool hasMedia = (!isPhysical || isPhysicalOptical) && !string.IsNullOrWhiteSpace(pathOrNumber);
                 if (hasMedia)
@@ -867,7 +855,7 @@ namespace ExHyperV.Services
             string vmName, VmStorageItem drive)
         {
             var vmResp = await WmiApi.QueryFirstAsync(
-                $"SELECT * FROM Msvm_ComputerSystem WHERE ElementName = '{WmiApi.Escape(vmName)}'",
+                $"SELECT * FROM Msvm_ComputerSystem WHERE {WmiApi.VmComputerSystemNamePredicate(vmName)}",
                 obj => Convert.ToInt32(obj["EnabledState"] ?? 0),
                 WmiScope.HyperV);
 
@@ -880,16 +868,6 @@ namespace ExHyperV.Services
                 isRunning &&
                 drive.ControllerType == "IDE")
             {
-                if (drive.DiskType != "Empty" && !string.IsNullOrEmpty(drive.PathOrDiskNumber))
-                {
-                    var ejectResult = await ModifyMediaPathAsync(
-                        vmName, drive.ControllerType, drive.ControllerNumber, drive.ControllerLocation,
-                        "Microsoft:Hyper-V:Virtual CD/DVD Disk", "");
-                    return ejectResult.Success
-                        ? (true, Properties.Resources.Msg_Storage_Ejected)
-                        : ejectResult;
-                }
-
                 return (false, Properties.Resources.Error_Storage_DvdHotRemove);
             }
 
@@ -973,13 +951,13 @@ namespace ExHyperV.Services
             if (!removeResult.Success)
                 return (false, FriendlyError.LastSentence(removeResult.Error));
 
-            // 仅物理硬盘直通才需把宿主盘还原上线；物理光驱(DvdDrive)也是 DiskType=="Physical" 但无关联磁盘号(默认 0)，
-            // 不加 DriveType 限定会误把宿主磁盘 0 上线。
+            // 仅物理硬盘直通才需把主机盘还原上线；物理光驱(DvdDrive)也是 DiskType=="Physical" 但无关联磁盘号(默认 0)，
+            // 不加 DriveType 限定会误把主机磁盘 0 上线。
             if (drive.DiskType == "Physical" && drive.DriveType == "HardDisk" && drive.DiskNumber > -1)
             {
                 await Task.Delay(500);
-                // Hyper-V 挂 pass-through 物理盘会把宿主盘置为只读(独占保护)；拿回宿主后必须清掉，
-                // 否则宿主看到的是只读盘、无法写(对齐 GPU 直通拿回 VmGpuService 的处理)。
+                // Hyper-V 挂 pass-through 物理盘会把主机盘置为只读(独占保护)；拿回主机后必须清掉，
+                // 否则主机看到的是只读盘、无法写(对齐 GPU 直通拿回 VmGpuService 的处理)。
                 await HostDiskService.SetDiskReadOnlyAsync(drive.DiskNumber, false);
                 await HostDiskService.SetDiskOfflineStatusAsync(drive.DiskNumber, false);
             }
@@ -1042,7 +1020,7 @@ namespace ExHyperV.Services
             if (target != null)
             {
                 // 弹出:运行中把 HostResource 改空会被 Hyper-V 拒(报"无法修改资源"/ErrorCode 32773,原生实测)。
-                // 正解=移除媒体那条 SASD → 媒体弹出、驱动器保留(原生实测 RemoveResourceSettings 成功)。
+                // 移除媒体对应的 SASD 可弹出媒体并保留驱动器。
                 if (string.IsNullOrWhiteSpace(newPath))
                 {
                     var mediaPathResp = await WmiApi.QueryFirstAsync(
@@ -1155,13 +1133,9 @@ namespace ExHyperV.Services
                 : (false, FriendlyError.LastSentence(addResult.Error));
         }
 
-        // ============================================================
         // 主机物理磁盘控制
-        // ============================================================
 
-        // ============================================================
         // ISO 镜像生成
-        // ============================================================
 
         private static async Task<(bool Success, string Message)> CreateIsoFromDirectoryAsync(
             string sourceDirectory, string targetIsoPath, string volumeLabel)
@@ -1432,9 +1406,7 @@ namespace ExHyperV.Services
             return (true, ctrlType, ctrlNum, ctrlLoc);
         }
 
-        // ============================================================
         // 内部辅助数据模型
-        // ============================================================
 
         private sealed record RasdInfo(string InstanceID, int ResourceType, string ObjPath);
 

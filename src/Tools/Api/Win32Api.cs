@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -9,6 +9,47 @@ namespace ExHyperV.Tools;
 
 public static class Win32Api
 {
+    /// <summary>
+    /// 将系统 INF 目录中的已发布名称（例如 oem35.inf）精确解析为 DriverStore 中的原始 INF 路径。
+    /// 该映射由 SetupAPI 维护，不能从目录名或驱动版本字符串推断。
+    /// </summary>
+    public static string GetInfDriverStoreLocation(string publishedInfName)
+    {
+        if (string.IsNullOrWhiteSpace(publishedInfName))
+            throw new ArgumentException("Published INF name is required.", nameof(publishedInfName));
+
+        uint requiredSize = 0;
+        bool firstCall = NativeMethods.SetupGetInfDriverStoreLocation(
+            publishedInfName,
+            nint.Zero,
+            nint.Zero,
+            null,
+            0,
+            out requiredSize);
+        int firstError = Marshal.GetLastWin32Error();
+        const int ErrorInsufficientBuffer = 122;
+        if (firstCall || firstError != ErrorInsufficientBuffer || requiredSize == 0)
+            throw new System.ComponentModel.Win32Exception(
+                firstError,
+                $"Unable to resolve the DriverStore location for {publishedInfName}.");
+
+        var buffer = new StringBuilder(checked((int)requiredSize));
+        if (!NativeMethods.SetupGetInfDriverStoreLocation(
+                publishedInfName,
+                nint.Zero,
+                nint.Zero,
+                buffer,
+                (uint)buffer.Capacity,
+                out requiredSize))
+        {
+            throw new System.ComponentModel.Win32Exception(
+                Marshal.GetLastWin32Error(),
+                $"Unable to resolve the DriverStore location for {publishedInfName}.");
+        }
+
+        return buffer.ToString();
+    }
+
     // ── PnP 设备控制 ──────────────────────────────────────────────
 
     public static ApiResponse EnablePnpDevice(string instanceId)
@@ -68,14 +109,14 @@ public static class Win32Api
     {
         var sw = Stopwatch.StartNew();
 
-        // 1. Win32_PnPEntity：拿在线设备的 Name/PNPClass/Service
-        var pnpEntityMap = new Dictionary<string, (string Name, string PnpClass, string Service)>(
+        // Win32_PnPEntity：拿在线设备的 Name/PNPClass/Service/Manufacturer
+        var pnpEntityMap = new Dictionary<string, (string Name, string PnpClass, string Service, string Manufacturer)>(
             StringComparer.OrdinalIgnoreCase);
         try
         {
             using var searcher = new System.Management.ManagementObjectSearcher(
                 @"root\cimv2",
-                "SELECT DeviceID, Name, PNPClass, Service FROM Win32_PnPEntity");
+                "SELECT DeviceID, Name, PNPClass, Service, Manufacturer FROM Win32_PnPEntity");
             using var collection = searcher.Get();
             foreach (System.Management.ManagementObject obj in collection)
             {
@@ -86,7 +127,8 @@ public static class Win32Api
                     pnpEntityMap[devId] = (
                         obj["Name"]?.ToString() ?? "",
                         obj["PNPClass"]?.ToString() ?? "",
-                        obj["Service"]?.ToString() ?? "");
+                        obj["Service"]?.ToString() ?? "",
+                        obj["Manufacturer"]?.ToString() ?? "");
                 }
             }
         }
@@ -96,15 +138,28 @@ public static class Win32Api
         }
         Debug.WriteLine($"[Win32Api.GetAllDevices] Win32_PnPEntity: {pnpEntityMap.Count} ({sw.ElapsedMilliseconds}ms)");
 
-        // 2. CM_Get_Device_ID_List：FILTER_NONE 枚举所有设备（含分配给VM的Unknown设备）
+        // CM_Get_Device_ID_List：FILTER_NONE 枚举所有设备（含分配给VM的Unknown设备）
         var allIds = GetDeviceIdList(NativeMethods.CM_GETIDLIST_FILTER_NONE);
         Debug.WriteLine($"[Win32Api.GetAllDevices] CM all devices: {allIds.Count} ({sw.ElapsedMilliseconds}ms)");
 
-        // 3. 并行查每个设备属性
+        // 并行查每个设备属性
         var results = allIds.AsParallel().Select(instanceId =>
         {
-            // PHANTOM flag 对在线和离线设备都有效
-            int lcr = NativeMethods.CM_Locate_DevNode(out uint devInst, instanceId, NativeMethods.CM_LOCATE_DEVNODE_PHANTOM);
+            // NORMAL 只定位当前在位节点；失败后再用 PHANTOM 读取离线节点的元数据。
+            // Status=Unknown 不能代替“是否在位”：驱动异常的在位设备会是 Error，部分 phantom
+            // 节点也可能仍能读取状态。DDA 枚举必须保留这两个维度。
+            int lcr = NativeMethods.CM_Locate_DevNode(
+                out uint devInst,
+                instanceId,
+                NativeMethods.CM_LOCATE_DEVNODE_NORMAL);
+            bool isPresent = lcr == NativeMethods.CR_SUCCESS;
+            if (!isPresent)
+            {
+                lcr = NativeMethods.CM_Locate_DevNode(
+                    out devInst,
+                    instanceId,
+                    NativeMethods.CM_LOCATE_DEVNODE_PHANTOM);
+            }
             if (lcr != NativeMethods.CR_SUCCESS)
             {
                 Debug.WriteLine($"[Win32Api.GetAllDevices] CM_Locate_DevNode failed '{instanceId}' cr={lcr}");
@@ -132,14 +187,17 @@ public static class Win32Api
                 new Guid("A45C254E-DF1C-4EFD-8020-67D146A850E0"), 9);  // DEVPKEY_Device_Class
             string service = GetDevNodeStringProperty(devInst, instanceId,
                 new Guid("A45C254E-DF1C-4EFD-8020-67D146A850E0"), 6);  // DEVPKEY_Device_Service
+            string manufacturer = GetDevNodeStringProperty(devInst, instanceId,
+                new Guid("A45C254E-DF1C-4EFD-8020-67D146A850E0"), 13); // DEVPKEY_Device_Manufacturer
             string parentInstanceId = GetDevNodeStringProperty(devInst, instanceId,
                 new Guid("4340A6C5-93FA-4706-972C-7B648008A5A7"), 8);  // DEVPKEY_Device_Parent
             // cfgmgr32 拿不到时 fallback Win32_PnPEntity
-            if (string.IsNullOrEmpty(friendlyName) && pnpEntityMap.TryGetValue(instanceId, out var entityInfo))
+            if (pnpEntityMap.TryGetValue(instanceId, out var entityInfo))
             {
-                friendlyName = entityInfo.Name;
+                friendlyName = string.IsNullOrEmpty(friendlyName) ? entityInfo.Name : friendlyName;
                 pnpClass = string.IsNullOrEmpty(pnpClass) ? entityInfo.PnpClass : pnpClass;
                 service = string.IsNullOrEmpty(service) ? entityInfo.Service : service;
+                manufacturer = string.IsNullOrEmpty(manufacturer) ? entityInfo.Manufacturer : manufacturer;
             }
 
             // LocationPaths
@@ -152,8 +210,10 @@ public static class Win32Api
                 FriendlyName = friendlyName,
                 Class = pnpClass,
                 Service = service,
+                Manufacturer = manufacturer,
                 ParentInstanceId = parentInstanceId,
                 Status = status,
+                IsPresent = isPresent,
                 LocationPaths = locationPaths
             };
         }).Where(x => x != null).Cast<PciDeviceInfo>().ToList();
@@ -314,7 +374,7 @@ public static class Win32Api
     }
 
     // ERROR_ACCESS_DENIED(5) = 同一键已有挂起的替换任务(重启前二次替换被内核拒绝)，
-    // 不再并入成功——由调用方按 code==5 翻译为"挂起"语义。
+    // code 5 由调用方解释为挂起状态。
     public static ApiResponse ReplaceHive(string subKeyName, string newHivePath, string backupPath)
     {
         int ret = NativeMethods.RegReplaceKey(NativeMethods.HKEY_LOCAL_MACHINE, subKeyName, newHivePath, backupPath);
@@ -358,8 +418,11 @@ public class PciDeviceInfo
     public string FriendlyName { get; set; } = "";
     public string Class { get; set; } = "";
     public string Service { get; set; } = "";
+    public string Manufacturer { get; set; } = "";
     public string ParentInstanceId { get; set; } = "";
     public string Status { get; set; } = "";
+    /// <summary>设备节点当前是否在 PnP 设备树中；与驱动状态（Status）相互独立。</summary>
+    public bool IsPresent { get; set; }
     public List<string> LocationPaths { get; set; } = new();
 
     public string? FirstLocationPath =>
@@ -391,6 +454,16 @@ internal static class NativeMethods
     public static extern bool SetupDiCallClassInstaller(int installFunction, nint deviceInfoSet, ref SP_DEVINFO_DATA deviceInfoData);
     [DllImport("setupapi.dll", SetLastError = true)]
     public static extern bool SetupDiDestroyDeviceInfoList(nint deviceInfoSet);
+    [DllImport("setupapi.dll", EntryPoint = "SetupGetInfDriverStoreLocationW", CharSet = CharSet.Unicode,
+        SetLastError = true, ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetupGetInfDriverStoreLocation(
+        [MarshalAs(UnmanagedType.LPWStr)] string fileName,
+        nint alternatePlatformInfo,
+        nint localeName,
+        StringBuilder? returnBuffer,
+        uint returnBufferSize,
+        out uint requiredSize);
 
     [StructLayout(LayoutKind.Sequential)]
     public struct SP_DEVINFO_DATA { public uint cbSize; public Guid ClassGuid; public uint DevInst; public nint Reserved; }

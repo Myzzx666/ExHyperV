@@ -349,7 +349,9 @@ public static class WmiApi
         Action<ManagementBaseObject>? setParams = null,
         string scope = WmiScope.HyperV,
         WmiContext? ctx = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IProgress<int>? progress = null,
+        TimeSpan? timeout = null)
     {
         ctx ??= WmiContext.Local;
 
@@ -370,7 +372,8 @@ public static class WmiApi
                 {
                     0 => ApiResponse.Ok(),
                     4096 => await WaitForJobAsync(
-                                (string)outParams["Job"], scope, ctx, cancellationToken),
+                                (string)outParams["Job"], scope, ctx, cancellationToken,
+                                progress, timeout),
                     _ => ApiResponse.Fail(
                                 $"Method '{methodName}' returned code {returnValue}",
                                 returnValue, ApiErrorSource.Wmi)
@@ -451,6 +454,57 @@ public static class WmiApi
             catch (Exception ex)
             {
                 return ApiResponse<ManagementBaseObject>.Fail(ex.Message, -1, ApiErrorSource.None, ex);
+            }
+        });
+    }
+
+    /// <summary>
+    /// 创建未提交的 WMI 类实例，在回调中配置属性，并序列化为可嵌入方法参数的 CIM DTD 文本。
+    /// 实例仅在回调期间有效，生命周期和异常归类均由 WmiApi 管理。
+    /// </summary>
+    public static Task<ApiResponse<string>> CreateInstanceTextAsync(
+        string className,
+        Func<ManagementObject, ApiResponse> configure,
+        string scope = WmiScope.HyperV,
+        WmiContext? ctx = null)
+    {
+        ctx ??= WmiContext.Local;
+
+        return Task.Run(() =>
+        {
+            try
+            {
+                var ms = WmiConnectionCache.GetManagementScope(scope, ctx);
+                using var cls = new ManagementClass(ms, new ManagementPath(className), null);
+                using var instance = cls.CreateInstance();
+                if (instance is null)
+                    return ApiResponse<string>.Fail(
+                        string.Format(
+                            Properties.Resources.Error_Wmi_CreateInstanceFailed,
+                            className));
+
+                var configureResult = configure(instance);
+                if (!configureResult.Success)
+                    return ApiResponse<string>.Fail(
+                        configureResult.Error,
+                        configureResult.Code,
+                        configureResult.ErrorSource);
+
+                return ApiResponse<string>.Ok(instance.GetText(TextFormat.CimDtd20));
+            }
+            catch (ManagementException ex)
+            {
+                return ApiResponse<string>.Fail(
+                    ex.Message, (int)ex.ErrorCode, ApiErrorSource.Wmi, ex);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                return ApiResponse<string>.Fail(
+                    ex.Message, 5, ApiErrorSource.Win32, ex);
+            }
+            catch (Exception ex)
+            {
+                return ApiResponse<string>.Fail(ex.Message, -1, ApiErrorSource.None, ex);
             }
         });
     }
@@ -597,7 +651,6 @@ public static class WmiApi
     /// <summary>
     /// 原 QueryRelatedCimAsync 的替代，带 sourceRole/resultRole 参数。
     /// 注意：GetRelated 第5个参数对应 resultRole，第6个对应 sourceRole（与 CIM 对调）。
-    /// 经过实测验证（test123 虚拟机，12条结果确认）。
     /// </summary>
     public static Task<ApiResponse<List<T>>> QueryRelatedCimAsync<T>(
         ManagementObject source,
@@ -727,6 +780,14 @@ public static class WmiApi
     // ── 辅助：Hyper-V 管理服务快捷获取 ───────────────────────────
 
     /// <summary>
+    /// 构造本机按显示名称定位虚拟机的 WQL 条件，并排除同名宿主机。
+    /// Msvm_ComputerSystem 同时包含宿主机和虚拟机：二者的 ElementName 可以相同，
+    /// 但宿主机 Name 是计算机名，而虚拟机 Name 是 GUID。
+    /// </summary>
+    internal static string VmComputerSystemNamePredicate(string vmName) =>
+        $"ElementName = '{Escape(vmName)}' AND Name <> '{Escape(Environment.MachineName)}'";
+
+    /// <summary>
     /// 获取 Msvm_VirtualSystemManagementService。
     /// 调用方负责 Dispose。
     /// </summary>
@@ -757,6 +818,29 @@ public static class WmiApi
         using var searcher = new ManagementObjectSearcher(
             ms, new ObjectQuery(
                 $"SELECT * FROM Msvm_ComputerSystem WHERE ElementName = '{safe}'"));
+        using var col = searcher.Get();
+        // 不依赖本机名，远程 WMI 上下文也能正确排除同名宿主机。
+        return col.Cast<ManagementObject>().FirstOrDefault(obj =>
+            Guid.TryParse(obj["Name"]?.ToString(), out _));
+    }
+
+    /// <summary>
+    /// 通过 Hyper-V 的稳定虚拟机标识（Msvm_ComputerSystem.Name）获取虚拟机。
+    /// 显示名称 ElementName 并不保证唯一，涉及具体虚拟机的操作应优先使用此重载。
+    /// </summary>
+    public static ManagementObject? GetVmComputerSystem(
+        Guid vmId,
+        string scope = WmiScope.HyperV,
+        WmiContext? ctx = null)
+    {
+        if (vmId == Guid.Empty) return null;
+
+        ctx ??= WmiContext.Local;
+        var ms = WmiConnectionCache.GetManagementScope(scope, ctx);
+        string safe = Escape(vmId.ToString("D"));
+        using var searcher = new ManagementObjectSearcher(
+            ms,
+            new ObjectQuery($"SELECT * FROM Msvm_ComputerSystem WHERE Name = '{safe}'"));
         using var col = searcher.Get();
         return col.Cast<ManagementObject>().FirstOrDefault();
     }
@@ -835,11 +919,13 @@ public static class WmiApi
         string jobPath,
         string scope,
         WmiContext ctx,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IProgress<int>? progress = null,
+        TimeSpan? timeout = null)
     {
-        // 上限 30 分钟：大固定 VHD 创建/快照合并等长任务远超旧的 2 分钟，过早超时会误报失败
-        // 并诱发上层回滚，而引擎侧 Job 仍在继续。主动取消语义由 cancellationToken 承担。
-        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromMinutes(30));
+        // 默认上限 30 分钟；导出等更长的任务可传入单独上限。过早超时会误报失败，
+        // 而引擎侧 Job 仍在继续。主动取消语义由 cancellationToken 承担。
+        using var timeoutCts = new CancellationTokenSource(timeout ?? TimeSpan.FromMinutes(30));
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
             cancellationToken, timeoutCts.Token);
 
@@ -852,9 +938,15 @@ public static class WmiApi
             {
                 job.Get();
                 ushort jobState = (ushort)job["JobState"];
+                int percentComplete = Convert.ToInt32(job["PercentComplete"] ?? 0);
+                progress?.Report(Math.Clamp(percentComplete, 0, 100));
 
                 // 7=Completed、32768=CompletedWithWarnings：微软管理库两者同判成功(带警告的操作已完成)
-                if (jobState == 7 || jobState == 32768) return ApiResponse.Ok();
+                if (jobState == 7 || jobState == 32768)
+                {
+                    progress?.Report(100);
+                    return ApiResponse.Ok();
+                }
 
                 if (jobState > 7)
                 {

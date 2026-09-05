@@ -8,6 +8,7 @@
     xmlns:sys="clr-namespace:System;assembly=mscorlib">
 
     <UserControl.Resources>
+        <converters:IsolationTypeDisplayConverter x:Key="IsolationTypeDisplayConverter"/>
     </UserControl.Resources>
 
     <Grid Background="{ui:ThemeResource ApplicationBackgroundBrush}">
@@ -18,11 +19,9 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- 内容区域 -->
         <ScrollViewer Grid.Row="0" Padding="24,24,24,0" VerticalScrollBarVisibility="Auto" PanningMode="VerticalOnly">
             <StackPanel>
 
-                <!-- 1. 标题栏 -->
                 <Grid Margin="0,0,0,24">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
@@ -39,7 +38,6 @@
                     </ui:Button>
                 </Grid>
 
-                <!-- === 常规 === -->
                 <TextBlock Text="{x:Static properties:Resources.Xaml_General}" FontSize="16" FontWeight="Medium" Margin="0,0,0,12"
                            Foreground="{ui:ThemeResource TextFillColorPrimaryBrush}"/>
 
@@ -66,7 +64,7 @@
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <ui:TextBox Text="{Binding NewVmStoragePath}" Width="450"/>
+                        <ui:TextBox Text="{Binding NewVmStoragePath, UpdateSourceTrigger=PropertyChanged}" Width="450"/>
                         <ui:Button Grid.Column="1" Content="{x:Static properties:Resources.Xaml_Browse}" Margin="8,0,0,0" Command="{Binding BrowseNewVmPathCommand}"/>
                     </Grid>
                 </ui:CardControl>
@@ -85,7 +83,6 @@
                     </StackPanel>
                 </ui:CardControl>
 
-                <!-- === 计算资源 === -->
                 <TextBlock Text="{x:Static properties:Resources.Xaml_ComputeRes}" FontSize="16" FontWeight="Medium" Margin="0,0,0,12" Foreground="{ui:ThemeResource TextFillColorPrimaryBrush}"/>
 
                 <ui:CardControl Header="{x:Static properties:Resources.Xaml_ProcessorCores}" Margin="0,0,0,8">
@@ -123,6 +120,8 @@
                             <sys:String>8192</sys:String>
                             <sys:String>16384</sys:String>
                             <sys:String>32768</sys:String>
+                            <sys:String>65536</sys:String>
+                            <sys:String>131072</sys:String>
                         </ComboBox>
                         <TextBlock Text="MB" VerticalAlignment="Center" Margin="12,0,0,0" Foreground="{ui:ThemeResource TextFillColorPrimaryBrush}"/>
                     </StackPanel>
@@ -146,17 +145,40 @@
 
                 <ui:CardControl Header="{x:Static properties:Resources.Xaml_ConfidentialCompute}" 
                                 Icon="{ui:SymbolIcon Symbol=ShieldLock24}" 
-                                Margin="0,0,0,24"
+                                Margin="0,0,0,8"
                                 IsEnabled="{Binding CanEnableIsolation}">
 
                     <StackPanel Orientation="Horizontal">
                         <ComboBox ItemsSource="{Binding SupportedIsolationTypes}" 
                                   SelectedItem="{Binding NewVmIsolationType}" 
-                                  Width="200"/>
+                                  Width="200">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Converter={StaticResource IsolationTypeDisplayConverter}}"/>
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
                    </StackPanel>
                 </ui:CardControl>
 
-                <!-- === 存储资源 === -->
+                <ui:CardControl Header="{x:Static properties:Resources.Xaml_OpenHclImage}"
+                                Icon="{ui:SymbolIcon Symbol=Document24}"
+                                Margin="0,0,0,8"
+                                Visibility="{Binding NewVmIsolationType, Converter={StaticResource EqualityToVisibilityConverter}, ConverterParameter=OpenHCL}">
+                    <StackPanel Width="480">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <ui:TextBox Text="{Binding NewVmOpenHclIgvmPath, UpdateSourceTrigger=PropertyChanged}"
+                                        PlaceholderText="{x:Static properties:Resources.Xaml_Placeholder_OpenHclIgvm}"/>
+                            <ui:Button Grid.Column="1" Content="{x:Static properties:Resources.Xaml_Browse}"
+                                       Margin="8,0,0,0" Width="80" Command="{Binding BrowseOpenHclIgvmCommand}"/>
+                        </Grid>
+                    </StackPanel>
+                </ui:CardControl>
+
                 <TextBlock Text="{x:Static properties:Resources.Xaml_StorageRes}" FontSize="16" FontWeight="Medium" Margin="0,12,0,12" Foreground="{ui:ThemeResource TextFillColorPrimaryBrush}"/>
 
                 <Border Background="{ui:ThemeResource CardBackgroundFillColorDefaultBrush}" 
@@ -175,7 +197,7 @@
                             </StackPanel>
                             <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
                                 <RadioButton Content="{x:Static properties:Resources.Xaml_NewDisk}" IsChecked="{Binding NewVmDiskMode, Converter={StaticResource EqualityConverter}, ConverterParameter=0}" Margin="0,0,16,0"/>
-                                <RadioButton Content="{x:Static properties:Resources.Xaml_ExistDisk}" IsChecked="{Binding NewVmDiskMode, Converter={StaticResource EqualityConverter}, ConverterParameter=1}" IsEnabled="{Binding IsSingleCreate}" Margin="0,0,16,0"/>
+                                <RadioButton Content="{x:Static properties:Resources.Xaml_ExistDisk}" IsChecked="{Binding NewVmDiskMode, Converter={StaticResource EqualityConverter}, ConverterParameter=1}" Margin="0,0,16,0"/>
                                 <RadioButton Content="{x:Static properties:Resources.Xaml_AttachLater}" IsChecked="{Binding NewVmDiskMode, Converter={StaticResource EqualityConverter}, ConverterParameter=2}"/>
                             </StackPanel>
                         </Grid>
@@ -207,7 +229,7 @@
                                         <ColumnDefinition Width="*"/>
                                         <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
-                                    <ui:TextBox Text="{Binding NewVmNewDiskPath}" PlaceholderText="{x:Static properties:Resources.Xaml_Placeholder_NewVhdxLoc}"/>
+                                    <ui:TextBox Text="{Binding NewVmNewDiskPath, UpdateSourceTrigger=PropertyChanged}" PlaceholderText="{x:Static properties:Resources.Xaml_Placeholder_NewVhdxLoc}"/>
                                     <ui:Button Grid.Column="1" Content="{x:Static properties:Resources.Xaml_Browse}" Margin="8,0,0,0" Width="80" Command="{Binding BrowseNewDiskLocationCommand}"/>
                                 </Grid>
                             </StackPanel>
@@ -224,6 +246,21 @@
                                 <ui:TextBox Text="{Binding NewVmExistingDiskPath}" PlaceholderText="{x:Static properties:Resources.Xaml_Placeholder_ExistVhd}"/>
                                 <ui:Button Grid.Column="1" Content="{x:Static properties:Resources.Xaml_Browse}" Margin="8,0,0,0" Width="80" Command="{Binding BrowseExistingDiskCommand}"/>
                             </Grid>
+                            <TextBlock Text="{x:Static properties:Resources.VmPage_BatchExistingDiskHint}"
+                                       FontSize="12"
+                                       Foreground="{ui:ThemeResource TextFillColorSecondaryBrush}"
+                                       Margin="0,8,0,0">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsSingleCreate}" Value="True">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
                         </StackPanel>
 
                         <!-- 模式2：稍后附加 -->
@@ -233,7 +270,6 @@
                     </StackPanel>
                 </Border>
 
-                <!-- === 安装介质 === -->
                 <Border Background="{ui:ThemeResource CardBackgroundFillColorDefaultBrush}" 
                         BorderBrush="{ui:ThemeResource CardStrokeColorDefaultBrush}" 
                         BorderThickness="1" CornerRadius="8" Padding="20" Margin="0,0,0,24">
@@ -259,7 +295,6 @@
                     </StackPanel>
                 </Border>
 
-                <!-- === 网络资源 === -->
                 <TextBlock Text="{x:Static properties:Resources.Xaml_NetworkRes}" FontSize="16" FontWeight="Medium" Margin="0,0,0,12" Foreground="{ui:ThemeResource TextFillColorPrimaryBrush}"/>
 
                 <ui:CardControl Header="{x:Static properties:Resources.Xaml_VirtualSwitch}" Margin="0,0,0,24" HorizontalContentAlignment="Stretch">
@@ -272,12 +307,11 @@
             </StackPanel>
         </ScrollViewer>
 
-        <!-- 3. 固定悬浮操作栏 (移出 ScrollViewer) -->
         <Border Grid.Row="1" Background="{ui:ThemeResource ApplicationBackgroundBrush}" BorderBrush="{ui:ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,1,0,0" Padding="24,8">
             <Grid>
                 <CheckBox Content="{x:Static properties:Resources.Xaml_StartAfterCreate}" IsChecked="{Binding StartVmAfterCreation}" VerticalAlignment="Center"/>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                    <ui:Button Content="{x:Static properties:Resources.Xaml_CreateVm}" Appearance="Primary" Width="150" Icon="{ui:SymbolIcon Symbol=Add24}" Command="{Binding ConfirmCreateCommand}" IsDefault="True"/>
+                    <ui:Button Content="{x:Static properties:Resources.Xaml_CreateVm}" Appearance="Primary" Width="150" Icon="{ui:SymbolIcon Symbol=Add24}" Command="{Binding ConfirmCreateCommand}" IsDefault="True" IsEnabled="{Binding IsLoadingCreateOptions, Converter={StaticResource InverseBooleanConverter}}"/>
                 </StackPanel>
             </Grid>
         </Border>
